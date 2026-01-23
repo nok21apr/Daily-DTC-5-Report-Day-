@@ -93,16 +93,9 @@ function getTodayFormatted() {
         // =================================================================
         console.log('📊 Processing Report 1: Over Speed...');
         
-        // 2️⃣ Step 2: Go to Report Page...
         await page.goto('https://gps.dtc.co.th/ultimate/Report/Report_03.php', { waitUntil: 'domcontentloaded' });
-        
-        // 3️⃣ Step 3: Fill Form
-        console.log('   Step 3: Fill Form...');
-        
         await page.waitForSelector('#speed_max', { visible: true });
         await page.waitForSelector('#ddl_truck', { visible: true });
-        
-        // รอสักนิดเพื่อให้ตัวเลือกใน Dropdown โหลดมาครบ
         await new Promise(r => setTimeout(r, 2000));
 
         // คำนวณเวลา 06:00 - 18:00 ของวันนี้ (แทนที่สูตรเดิมใน Snippet)
@@ -123,10 +116,9 @@ function getTodayFormatted() {
             document.getElementById('date9').dispatchEvent(new Event('change'));
             document.getElementById('date10').dispatchEvent(new Event('change'));
 
-            // Options (Command 13)
             if(document.getElementById('ddlMinute')) document.getElementById('ddlMinute').value = '1';
             
-            // --- Select Truck (UI.Vision Command 14) ---
+            // --- Select Truck
             var selectElement = document.getElementById('ddl_truck'); 
             var options = selectElement.options; 
             for (var i = 0; i < options.length; i++) { 
@@ -138,29 +130,15 @@ function getTodayFormatted() {
             var event = new Event('change', { bubbles: true }); 
             selectElement.dispatchEvent(event);
         }, startDateTime, endDateTime);
-
-        // 4️⃣ Step 4: Search
-        console.log('   Step 4: Search...');
         await page.evaluate(() => {
             if(typeof sertch_data === 'function') sertch_data();
             else document.querySelector("span[onclick='sertch_data();']").click();
         });
-
-        // 5️⃣ Step 5: Wait 120s (Hard Wait)
-        // หมายเหตุ: ปรับลดลงเหลือ 60s ถ้าข้อมูลไม่เยอะมาก หรือใช้ waitForSelector ตามด้านล่างจะเร็วกว่า
-        console.log('   Step 5: Waiting for Data Loading...');
         try {
             await page.waitForSelector('#btnexport', { visible: true, timeout: 300000 }); // รอสูงสุด 5 นาที
             // รอเพิ่มอีกนิดเพื่อให้ข้อมูลโหลดสมบูรณ์จริงๆ หลังปุ่มขึ้น
             await new Promise(r => setTimeout(r, 5000)); 
         } catch(e) {
-            console.warn('   ⚠️ Warning: Export button wait timed out');
-        }
-        console.log('   ✅ Data Loaded.');
-
-        // 6️⃣ Step 6: Export & Download
-        console.log('   Step 6: Exporting...');
-        
         await page.evaluate(() => document.getElementById('btnexport').click());
         
         // ใช้ Helper Function แทน Loop ใน Snippet เพื่อเปลี่ยนชื่อไฟล์และจัดการ Error
