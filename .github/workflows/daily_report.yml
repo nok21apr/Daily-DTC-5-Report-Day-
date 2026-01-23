@@ -38,4 +38,14 @@ jobs:
         with:
           name: downloaded-reports
           path: downloads/
+          
+      - name: Upload Debug Screenshots
+        if: always() # ทำงานเสมอ ไม่ว่าจะ Success หรือ Failed
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: |
+            downloads/*.png
+            *.png
+          if-no-files-found: ignore
           retention-days: 1
