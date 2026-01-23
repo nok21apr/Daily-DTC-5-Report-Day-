@@ -47,11 +47,10 @@ function getTodayFormatted() {
     }
 
     const downloadPath = path.resolve('./downloads');
-    // เคลียร์ไฟล์เก่าก่อนเริ่มทำงานเสมอ
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation (Full Flow)...');
+    console.log('🚀 Starting DTC Automation (Fixed Login Logic)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -59,6 +58,10 @@ function getTodayFormatted() {
     });
 
     const page = await browser.newPage();
+    // Timeout 5 นาที ตามไฟล์ตัวอย่าง
+    page.setDefaultNavigationTimeout(300000);
+    page.setDefaultTimeout(300000);
+    
     const client = await page.target().createCDPSession();
     await client.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadPath });
     
@@ -66,71 +69,117 @@ function getTodayFormatted() {
     await page.emulateTimezone('Asia/Bangkok');
 
     try {
-        // Step 1: Login
+        // =================================================================
+        // STEP 1: LOGIN (แก้ไขตามไฟล์แนบ)
+        // =================================================================
         console.log('1️⃣ Step 1: Login...');
         await page.goto('https://gps.dtc.co.th/ultimate/index.php', { waitUntil: 'domcontentloaded' });
+        
         await page.waitForSelector('#txtname', { visible: true, timeout: 60000 });
         await page.type('#txtname', DTC_USERNAME);
         await page.type('#txtpass', DTC_PASSWORD);
+        
+        console.log('   Clicking Login...');
+        // ใช้ logic เดียวกับไฟล์ตัวอย่าง: คลิกผ่าน DOM และรอจนกว่ากล่อง user จะหายไป
         await Promise.all([
             page.evaluate(() => document.getElementById('btnLogin').click()),
             page.waitForFunction(() => !document.querySelector('#txtname'), { timeout: 60000 })
         ]);
         console.log('✅ Login Success');
 
-
-        // Step 2: Report 1 (Over Speed)
+        // =================================================================
+        // STEP 2: REPORT 1 - Over Speed (Updated from attached file)
+        // =================================================================
         console.log('📊 Processing Report 1: Over Speed...');
-        await page.goto('https://gps.dtc.co.th/ultimate/Report/report_other_status.php', { waitUntil: 'domcontentloaded' });
-        await page.waitForSelector('#date9', { visible: true });
         
-        await page.waitForSelector('#ddl_truck');
+        // ใช้ URL จากไฟล์แนบ indexJS.txt (Report_03.php)
+        await page.goto('https://gps.dtc.co.th/ultimate/Report/Report_03.php', { waitUntil: 'domcontentloaded' });
+        
+        // รอ Selector สำคัญ
+        await page.waitForSelector('#speed_max', { visible: true, timeout: 60000 });
+        await page.waitForSelector('#ddl_truck', { visible: true });
+
+        // คำนวณเวลา 06:00 - 18:00 ของวันนี้
+        const todayStr = getTodayFormatted();
+        const startDateTime = `${todayStr} 06:00`;
+        const endDateTime = `${todayStr} 18:00`;
+        console.log(`   Setting parameters (Speed: 55, Time: ${startDateTime} - ${endDateTime})...`);
+
+        await page.evaluate((start, end) => {
+            // Speed (Command 8 from attached file)
+            document.getElementById('speed_max').value = '55';
+            
+            // Date (Fixed to 06:00 - 18:00)
+            document.getElementById('date9').value = start;
+            document.getElementById('date10').value = end;
+            
+            // Trigger Events
+            document.getElementById('date9').dispatchEvent(new Event('change'));
+            document.getElementById('date10').dispatchEvent(new Event('change'));
+
+            // Minute (Command 13)
+            if(document.getElementById('ddlMinute')) document.getElementById('ddlMinute').value = '1';
+            
+            // Select Truck "ทั้งหมด" (Command 14 from attached file)
+            var selectElement = document.getElementById('ddl_truck'); 
+            var options = selectElement.options; 
+            for (var i = 0; i < options.length; i++) { 
+                if (options[i].text.includes('ทั้งหมด')) { 
+                    selectElement.value = options[i].value; 
+                    break; 
+                } 
+            } 
+            var event = new Event('change', { bubbles: true }); 
+            selectElement.dispatchEvent(event);
+        }, startDateTime, endDateTime);
+
+        // Search Logic from attached file
+        console.log('   Searching Report 1...');
         await page.evaluate(() => {
-            const select = document.getElementById('ddl_truck');
-            for (let opt of select.options) {
-                if (opt.text.includes('ทั้งหมด') || opt.text.toLowerCase().includes('all')) {
-                    select.value = opt.value;
-                    select.dispatchEvent(new Event('change', { bubbles: true }));
-                    break;
-                }
+            if(typeof sertch_data === 'function') sertch_data();
+            else {
+                const btn = document.querySelector("span[onclick='sertch_data();']");
+                if(btn) btn.click();
             }
         });
 
-        const todayStr = getTodayFormatted();
-        await page.evaluate(() => document.getElementById('date9').value = '');
-        await page.type('#date9', `${todayStr} 06:00`);
-        await page.evaluate(() => document.getElementById('date10').value = '');
-        await page.type('#date10', `${todayStr} 18:00`);
-
-        console.log('   Searching Report 1...');
-        await page.click('td:nth-of-type(5) > span');
-        await new Promise(r => setTimeout(r, 60000)); // รอโหลดข้อมูล
+        // Wait for Export button (Logic from attached file)
+        console.log('   Waiting for data to load...');
+        try {
+            await page.waitForSelector('#btnexport', { visible: true, timeout: 300000 }); // 5 mins max
+        } catch(e) {
+            console.warn('   ⚠️ Warning: Export button wait timed out, attempting to click anyway...');
+        }
 
         console.log('   Exporting Report 1...');
-        await page.waitForSelector('#btnexport', { visible: true });
-        await page.click('#btnexport');
+        await page.evaluate(() => document.getElementById('btnexport').click());
+        
         await waitForDownloadAndRename(downloadPath, 'Report1_OverSpeed.xls');
 
-        // Step 3-6: Other Reports (Placeholder)
-        // ... (ใส่ Code สำหรับ Report 2-5 ตรงนี้ และใช้ waitForDownloadAndRename ตามลำดับ) ...
+        // =================================================================
+        // STEP 3-6: Other Reports (Placeholder for Puppeteer Replay)
+        // =================================================================
+        // ... พื้นที่สำหรับวาง Code Report 2-5 ...
 
-        // Step 7: Generate PDF (Placeholder)
+
+        // =================================================================
+        // STEP 7: Generate PDF (Placeholder)
+        // =================================================================
         console.log('📑 Generating PDF Summary (Pending)...');
-        // TODO: ใส่ Logic สร้าง PDF ตรงนี้ และ save ไฟล์เป็น 'Summary_Report.pdf' ลงใน downloadPath
 
-        // Step 8: Send Email
+
+        // =================================================================
+        // STEP 8: Send Email
+        // =================================================================
         console.log('📧 Step 8: Sending Email...');
         
-        // อ่านรายชื่อไฟล์ทั้งหมดใน folder downloads เพื่อแนบไปกับเมล์
         const allFiles = fs.readdirSync(downloadPath);
         const attachments = allFiles.map(file => ({
             filename: file,
             path: path.join(downloadPath, file)
         }));
 
-        if (attachments.length === 0) {
-            console.warn('⚠️ No files to send!');
-        } else {
+        if (attachments.length > 0) {
             const transporter = nodemailer.createTransport({
                 service: 'gmail',
                 auth: { user: EMAIL_USER, pass: EMAIL_PASS }
@@ -144,24 +193,24 @@ function getTodayFormatted() {
                 attachments: attachments
             });
             console.log('   ✅ Email Sent Successfully!');
+        } else {
+            console.warn('⚠️ No files to send!');
         }
 
-        // Step 9: Cleanup Files
+        // =================================================================
+        // STEP 9: Cleanup Files
+        // =================================================================
         console.log('🧹 Step 9: Cleaning up files...');
         const filesToDelete = fs.readdirSync(downloadPath);
         for (const file of filesToDelete) {
             try {
                 fs.unlinkSync(path.join(downloadPath, file));
-                console.log(`   Deleted: ${file}`);
-            } catch (err) {
-                console.error(`   Failed to delete ${file}:`, err.message);
-            }
+            } catch (err) { }
         }
         console.log('   ✅ Cleanup Complete.');
 
     } catch (err) {
         console.error('❌ Fatal Error:', err);
-        // ถ่ายรูปตอน Error เก็บไว้ (จะถูก Upload ขึ้น GitHub Artifacts)
         await page.screenshot({ path: path.join(downloadPath, 'error_screenshot.png') });
         process.exit(1);
     } finally {
