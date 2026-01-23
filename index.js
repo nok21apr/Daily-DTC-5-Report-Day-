@@ -64,7 +64,7 @@ function getTodayFormatted() {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation (Direct File Attachment Mode)...');
+    console.log('🚀 Starting DTC Automation (Hard Wait Mode)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -72,8 +72,9 @@ function getTodayFormatted() {
     });
 
     const page = await browser.newPage();
-    page.setDefaultNavigationTimeout(300000);
-    page.setDefaultTimeout(300000);
+    // เพิ่ม Timeout เป็น 10 นาที เพื่อรองรับการรอ 5 นาที
+    page.setDefaultNavigationTimeout(600000);
+    page.setDefaultTimeout(600000);
     
     const client = await page.target().createCDPSession();
     await client.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadPath });
@@ -157,15 +158,17 @@ function getTodayFormatted() {
             else document.querySelector("span[onclick='sertch_data();']").click();
         });
 
-        // Wait for Data Loading
-        console.log('   Waiting for Data Loading...');
+        // Wait for Data Loading (HARD WAIT ADDED)
+        console.log('   ⏳ Waiting for Data Loading (300,000ms / 5 mins)...');
+        // บังคับรอ 5 นาทีเต็ม ตามที่ร้องขอ
+        await new Promise(resolve => setTimeout(resolve, 300000));
+        
+        console.log('   ✅ Wait Complete. Checking for export button...');
         try {
-            await page.waitForSelector('#btnexport', { visible: true, timeout: 300000 }); // รอสูงสุด 5 นาที
-            await new Promise(r => setTimeout(r, 5000)); 
+            await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 });
         } catch(e) {
-            console.warn('   ⚠️ Warning: Export button wait timed out');
+            console.warn('   ⚠️ Warning: Export button check timed out (Script will try to click anyway)');
         }
-        console.log('   ✅ Data Loaded.');
 
         // Export & Download
         console.log('   Exporting...');
