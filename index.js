@@ -203,7 +203,7 @@ function extractDataFromReport(filePath, reportType) {
             if (select) { for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } select.dispatchEvent(new Event('change', { bubbles: true })); }
         }, startDateTime, endDateTime);
         await page.click('td:nth-of-type(6) > span');
-        await new Promise(r => setTimeout(r, 300000)); // 5 mins
+        await new Promise(r => setTimeout(r, 240000)); // 4 mins
         await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button'));
             const b = btns.find(b => b.innerText.includes('Excel') || b.title === 'Excel');
@@ -255,8 +255,8 @@ function extractDataFromReport(filePath, reportType) {
             await page.click('td:nth-of-type(6) > span');
 
             // เพิ่มเวลาการรอเป็น 5 นาที (300 วินาที)
-            console.log('   ⏳ Waiting 5 mins for Report 4 data...');
-            await new Promise(r => setTimeout(r, 300000));
+            console.log('   ⏳ Waiting 4 mins for Report 4 data...');
+            await new Promise(r => setTimeout(r, 240000));
 
             // Debug 3: หลังรอ 5 นาที (ดูว่าข้อมูลมาไหม)
             await page.screenshot({ path: path.join(downloadPath, 'report4_03_after_wait.png') });
