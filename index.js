@@ -2,7 +2,7 @@ const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
 const nodemailer = require('nodemailer');
-const { JSDOM } = require('jsdom'); // จำเป็นต้องใช้ jsdom เพื่ออ่านไฟล์รายงาน
+const { JSDOM } = require('jsdom');
 
 // --- Helper Functions ---
 
@@ -10,7 +10,8 @@ async function waitForDownloadAndRename(downloadPath, newFileName) {
     console.log(`   Waiting for download: ${newFileName}...`);
     let downloadedFile = null;
 
-    for (let i = 0; i < 180; i++) { // เพิ่มเวลารอเป็น 3 นาทีเผื่อไฟล์ใหญ่
+    // รอไฟล์สูงสุด 5 นาที (300 วินาที) เผื่อไฟล์ใหญ่มาก
+    for (let i = 0; i < 300; i++) {
         const files = fs.readdirSync(downloadPath);
         downloadedFile = files.find(f => 
             (f.endsWith('.xls') || f.endsWith('.xlsx')) && 
@@ -60,22 +61,17 @@ function parseDurationToMinutes(durationStr) {
     return 0;
 }
 
-// ฟังก์ชันอ่านข้อมูลจากไฟล์ HTML Report (DTC Export มักเป็น HTML Table ที่นามสกุล .xls)
 function extractDataFromReport(filePath, reportType) {
     try {
         const content = fs.readFileSync(filePath, 'utf-8');
         const dom = new JSDOM(content);
         const rows = Array.from(dom.window.document.querySelectorAll('table tr'));
         const data = [];
-
-        // ข้าม Header row (row 0)
         for (let i = 1; i < rows.length; i++) {
             const cells = Array.from(rows[i].querySelectorAll('td')).map(td => td.textContent.trim());
             if (cells.length < 3) continue;
-
             if (reportType === 'speed') {
                 const plate = cells.find(c => c.match(/\d{1,3}-\d{4}/)) || cells[1]; 
-                const count = 1; 
                 const duration = cells[cells.length - 1]; 
                 data.push({ plate, duration, durationMin: parseDurationToMinutes(duration) });
             } 
@@ -116,7 +112,7 @@ function extractDataFromReport(filePath, reportType) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation (Fixed Report 4 Logic)...');
+    console.log('🚀 Starting DTC Automation (Report 4 Debug Mode)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -207,7 +203,7 @@ function extractDataFromReport(filePath, reportType) {
             if (select) { for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } select.dispatchEvent(new Event('change', { bubbles: true })); }
         }, startDateTime, endDateTime);
         await page.click('td:nth-of-type(6) > span');
-        await new Promise(r => setTimeout(r, 120000)); // 2 mins
+        await new Promise(r => setTimeout(r, 300000)); // 5 mins
         await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button'));
             const b = btns.find(b => b.innerText.includes('Excel') || b.title === 'Excel');
@@ -215,65 +211,81 @@ function extractDataFromReport(filePath, reportType) {
         });
         const file3 = await waitForDownloadAndRename(downloadPath, 'Report3_SuddenBrake.xls');
 
-        // Report 4: Harsh Start (FIXED)
+        // =================================================================
+        // REPORT 4: Harsh Start (Debug & Fixed Version)
+        // =================================================================
         console.log('📊 Processing Report 4: Harsh Start...');
-        await page.goto('https://gps.dtc.co.th/ultimate/Report/report_ha.php', { waitUntil: 'domcontentloaded' });
-        
-        // 1. รอ Elements และตรวจสอบ Dropdown
-        await page.waitForSelector('#date9', { visible: true });
-        await page.waitForSelector('#ddl_truck', { visible: true }); // รอ Dropdown รถ
-        await new Promise(r => setTimeout(r, 2000)); // รอโหลด Option ใน Dropdown
-
-        // 2. ตั้งค่าวันที่และเลือก "รถทั้งหมด"
-        await page.evaluate((start, end) => {
-            document.getElementById('date9').value = start;
-            document.getElementById('date10').value = end;
-            document.getElementById('date9').dispatchEvent(new Event('change'));
-            document.getElementById('date10').dispatchEvent(new Event('change'));
+        try {
+            await page.goto('https://gps.dtc.co.th/ultimate/Report/report_ha.php', { waitUntil: 'domcontentloaded' });
             
-            var select = document.getElementById('ddl_truck'); 
-            if (select && select.options.length > 0) { 
-                for (let opt of select.options) { 
-                    if (opt.text.includes('ทั้งหมด')) { 
-                        select.value = opt.value; 
-                        break; 
-                    } 
-                } 
-                select.dispatchEvent(new Event('change', { bubbles: true })); 
-            }
-        }, startDateTime, endDateTime);
-        
-        // 3. กดค้นหา (ใช้ Selector ที่แม่นยำตาม Recording)
-        console.log('   Searching Report 4...');
-        await page.waitForSelector('td:nth-of-type(6) > span', { visible: true });
-        await page.click('td:nth-of-type(6) > span');
-        
-        // 4. รอ 3 นาที (180s) ตามที่ร้องขอ
-        console.log('   ⏳ Waiting 3 mins (Data Loading)...'); 
-        await new Promise(r => setTimeout(r, 180000)); 
-        
-        // 5. กด Export Excel (เพิ่มความแม่นยำ)
-        console.log('   Exporting Report 4...');
-        await page.evaluate(() => {
-            // พยายามหาปุ่ม Excel ให้เจอ
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const excelBtn = buttons.find(b => 
-                (b.innerText && b.innerText.includes('Excel')) || 
-                b.getAttribute('title') === 'Excel' || 
-                b.getAttribute('aria-label') === 'Excel'
-            );
+            // Debug 1: ถึงหน้าเว็บหรือไม่
+            await page.screenshot({ path: path.join(downloadPath, 'report4_01_loaded.png') });
             
-            if (excelBtn) {
-                excelBtn.click();
-            } else {
-                // Fallback ตาม Recording: ปุ่มที่ 3 ใน div แรกของ #table
-                const fallback = document.querySelector('#table > div:first-child > button:nth-child(3)');
-                if (fallback) fallback.click();
-                else throw new Error("Export button not found for Report 4");
-            }
-        });
+            // รอวันที่โหลด (สำคัญ)
+            await page.waitForSelector('#date9', { visible: true, timeout: 60000 });
 
-        const file4 = await waitForDownloadAndRename(downloadPath, 'Report4_HarshStart.xls');
+            // เช็คและเลือก Dropdown รถ (แบบปลอดภัย ไม่ Error ถ้าไม่เจอ)
+            console.log('   Setting Report 4 Conditions...');
+            await page.evaluate((start, end) => {
+                // 1. วันที่
+                document.getElementById('date9').value = start;
+                document.getElementById('date10').value = end;
+                document.getElementById('date9').dispatchEvent(new Event('change'));
+                document.getElementById('date10').dispatchEvent(new Event('change'));
+                
+                // 2. รถทั้งหมด (ตรวจสอบก่อนว่ามี Element ไหม)
+                const truckSelect = document.getElementById('ddl_truck');
+                if (truckSelect) {
+                    for (let opt of truckSelect.options) {
+                        if (opt.text.includes('ทั้งหมด')) {
+                            truckSelect.value = opt.value;
+                            break;
+                        }
+                    }
+                    truckSelect.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+            }, startDateTime, endDateTime);
+
+            // Debug 2: ก่อนกดค้นหา
+            await page.screenshot({ path: path.join(downloadPath, 'report4_02_before_search.png') });
+
+            // กดค้นหา
+            console.log('   Clicking Search Report 4...');
+            await page.waitForSelector('td:nth-of-type(6) > span', { visible: true });
+            await page.click('td:nth-of-type(6) > span');
+
+            // เพิ่มเวลาการรอเป็น 5 นาที (300 วินาที)
+            console.log('   ⏳ Waiting 5 mins for Report 4 data...');
+            await new Promise(r => setTimeout(r, 300000));
+
+            // Debug 3: หลังรอ 5 นาที (ดูว่าข้อมูลมาไหม)
+            await page.screenshot({ path: path.join(downloadPath, 'report4_03_after_wait.png') });
+
+            // กด Export
+            console.log('   Clicking Export Report 4...');
+            await page.evaluate(() => {
+                // Selector ตรงตาม Recording: #table > div > button ปุ่มที่ 3
+                const xpathResult = document.evaluate('//*[@id="table"]/div[1]/button[3]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                const btn = xpathResult.singleNodeValue;
+                
+                if (btn) {
+                    btn.click();
+                } else {
+                    // Fallback: หาปุ่มที่มีคำว่า Excel
+                    const allBtns = Array.from(document.querySelectorAll('button'));
+                    const excelBtn = allBtns.find(b => b.innerText.includes('Excel') || b.title === 'Excel');
+                    if (excelBtn) excelBtn.click();
+                    else throw new Error("Cannot find Export button for Report 4");
+                }
+            });
+
+            const file4 = await waitForDownloadAndRename(downloadPath, 'Report4_HarshStart.xls');
+
+        } catch (error) {
+            console.error('❌ Report 4 Failed:', error.message);
+            await page.screenshot({ path: path.join(downloadPath, 'report4_error_snapshot.png') });
+            throw error; // ส่ง Error ต่อเพื่อให้โปรแกรมหยุดถ้าจำเป็น หรือจะข้ามก็ได้
+        }
 
         // Report 5: Forbidden
         console.log('📊 Processing Report 5: Forbidden Parking...');
@@ -302,15 +314,19 @@ function extractDataFromReport(filePath, reportType) {
         const file5 = await waitForDownloadAndRename(downloadPath, 'Report5_ForbiddenParking.xls');
 
         // =================================================================
-        // STEP 7: Generate PDF Summary (Implemented)
+        // STEP 7: Generate PDF Summary
         // =================================================================
         console.log('📑 Step 7: Generating PDF Summary...');
 
-        // 1. อ่านและสรุปผลข้อมูล
         const speedData = extractDataFromReport(file1, 'speed');
         const idlingData = extractDataFromReport(file2, 'idling');
         const brakeData = extractDataFromReport(file3, 'critical');
-        const startData = extractDataFromReport(file4, 'critical'); 
+        // Check if Report 4 file exists before reading
+        let startData = [];
+        try {
+            startData = extractDataFromReport(path.join(downloadPath, 'Report4_HarshStart.xls'), 'critical');
+        } catch(e) { console.warn("Skipping Report 4 data in PDF due to missing file"); }
+        
         const forbiddenData = extractDataFromReport(file5, 'forbidden');
 
         // Aggregation Logic (Top 5)
@@ -348,7 +364,6 @@ function extractDataFromReport(filePath, reportType) {
 
         const totalCritical = brakeData.length + startData.length;
 
-        // 2. HTML Template for PDF
         const htmlContent = `
         <!DOCTYPE html>
         <html lang="th">
