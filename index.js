@@ -10,7 +10,7 @@ async function waitForDownloadAndRename(downloadPath, newFileName) {
     console.log(`   Waiting for download: ${newFileName}...`);
     let downloadedFile = null;
 
-    for (let i = 0; i < 120; i++) {
+    for (let i = 0; i < 180; i++) { // เพิ่มเวลารอเป็น 3 นาทีเผื่อไฟล์ใหญ่
         const files = fs.readdirSync(downloadPath);
         downloadedFile = files.find(f => 
             (f.endsWith('.xls') || f.endsWith('.xlsx')) && 
@@ -116,7 +116,7 @@ function extractDataFromReport(filePath, reportType) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation (Adjusted Report 4 Wait Time)...');
+    console.log('🚀 Starting DTC Automation (Fixed Report 4 Logic)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -215,45 +215,64 @@ function extractDataFromReport(filePath, reportType) {
         });
         const file3 = await waitForDownloadAndRename(downloadPath, 'Report3_SuddenBrake.xls');
 
-        // Report 4: Harsh Start (Updated Wait Time: 2 -> 3 mins)
+        // Report 4: Harsh Start (FIXED)
         console.log('📊 Processing Report 4: Harsh Start...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/report_ha.php', { waitUntil: 'domcontentloaded' });
+        
+        // 1. รอ Elements และตรวจสอบ Dropdown
         await page.waitForSelector('#date9', { visible: true });
-        await new Promise(r => setTimeout(r, 2000));
+        await page.waitForSelector('#ddl_truck', { visible: true }); // รอ Dropdown รถ
+        await new Promise(r => setTimeout(r, 2000)); // รอโหลด Option ใน Dropdown
+
+        // 2. ตั้งค่าวันที่และเลือก "รถทั้งหมด"
         await page.evaluate((start, end) => {
             document.getElementById('date9').value = start;
             document.getElementById('date10').value = end;
             document.getElementById('date9').dispatchEvent(new Event('change'));
             document.getElementById('date10').dispatchEvent(new Event('change'));
+            
             var select = document.getElementById('ddl_truck'); 
-            if (select) { for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } select.dispatchEvent(new Event('change', { bubbles: true })); }
+            if (select && select.options.length > 0) { 
+                for (let opt of select.options) { 
+                    if (opt.text.includes('ทั้งหมด')) { 
+                        select.value = opt.value; 
+                        break; 
+                    } 
+                } 
+                select.dispatchEvent(new Event('change', { bubbles: true })); 
+            }
         }, startDateTime, endDateTime);
         
+        // 3. กดค้นหา (ใช้ Selector ที่แม่นยำตาม Recording)
         console.log('   Searching Report 4...');
+        await page.waitForSelector('td:nth-of-type(6) > span', { visible: true });
         await page.click('td:nth-of-type(6) > span');
         
-        console.log('   ⏳ Waiting 3 mins (Updated)...'); // แจ้งเตือนว่ารอ 3 นาที
-        await new Promise(r => setTimeout(r, 180000)); // ปรับเป็น 3 นาที (180,000 ms)
+        // 4. รอ 3 นาที (180s) ตามที่ร้องขอ
+        console.log('   ⏳ Waiting 3 mins (Data Loading)...'); 
+        await new Promise(r => setTimeout(r, 180000)); 
         
+        // 5. กด Export Excel (เพิ่มความแม่นยำ)
         console.log('   Exporting Report 4...');
         await page.evaluate(() => {
-            const btns = Array.from(document.querySelectorAll('button'));
-            // เพิ่มความยืดหยุ่นในการหาปุ่ม (Text หรือ Title หรือ Aria Label)
-            const b = btns.find(b => 
+            // พยายามหาปุ่ม Excel ให้เจอ
+            const buttons = Array.from(document.querySelectorAll('button'));
+            const excelBtn = buttons.find(b => 
                 (b.innerText && b.innerText.includes('Excel')) || 
-                b.title === 'Excel' || 
+                b.getAttribute('title') === 'Excel' || 
                 b.getAttribute('aria-label') === 'Excel'
             );
             
-            if (b) {
-                b.click();
+            if (excelBtn) {
+                excelBtn.click();
             } else {
-                // Fallback สุดท้ายถ้าหาไม่เจอ
-                const fallback = document.querySelector('#table button:nth-of-type(3)');
+                // Fallback ตาม Recording: ปุ่มที่ 3 ใน div แรกของ #table
+                const fallback = document.querySelector('#table > div:first-child > button:nth-child(3)');
                 if (fallback) fallback.click();
                 else throw new Error("Export button not found for Report 4");
             }
         });
+
         const file4 = await waitForDownloadAndRename(downloadPath, 'Report4_HarshStart.xls');
 
         // Report 5: Forbidden
