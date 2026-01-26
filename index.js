@@ -64,7 +64,7 @@ function getTodayFormatted() {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation (Hard Wait Mode)...');
+    console.log('🚀 Starting DTC Automation (Report 1 & 2 Included)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -72,9 +72,9 @@ function getTodayFormatted() {
     });
 
     const page = await browser.newPage();
-    // เพิ่ม Timeout เป็น 10 นาที เพื่อรองรับการรอ 5 นาที
-    page.setDefaultNavigationTimeout(600000);
-    page.setDefaultTimeout(600000);
+    // เพิ่ม Timeout เป็น 15 นาที (เผื่อ 2 รายงาน x 5 นาที + login)
+    page.setDefaultNavigationTimeout(900000);
+    page.setDefaultTimeout(900000);
     
     const client = await page.target().createCDPSession();
     await client.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadPath });
@@ -100,88 +100,108 @@ function getTodayFormatted() {
         ]);
         console.log('✅ Login Success');
 
+        // คำนวณเวลา 06:00 - 18:00 ของวันนี้ (ใช้ร่วมกันทุก Report)
+        const todayStr = getTodayFormatted();
+        const startDateTime = `${todayStr} 06:00`;
+        const endDateTime = `${todayStr} 18:00`;
+        console.log(`🕒 Global Time Settings: ${startDateTime} to ${endDateTime}`);
+
         // =================================================================
         // STEP 2: REPORT 1 - Over Speed
         // =================================================================
         console.log('📊 Processing Report 1: Over Speed...');
         
-        // Go to Report Page
         await page.goto('https://gps.dtc.co.th/ultimate/Report/Report_03.php', { waitUntil: 'domcontentloaded' });
         
-        // Fill Form
         console.log('   Filling Form...');
-        
         await page.waitForSelector('#speed_max', { visible: true });
         await page.waitForSelector('#ddl_truck', { visible: true });
-        
-        // รอสักนิดเพื่อให้ตัวเลือกใน Dropdown โหลดมาครบ
         await new Promise(r => setTimeout(r, 2000));
 
-        // คำนวณเวลา 06:00 - 18:00 ของวันนี้
-        const todayStr = getTodayFormatted();
-        const startDateTime = `${todayStr} 06:00`;
-        const endDateTime = `${todayStr} 18:00`;
-        console.log(`   Setting Time: ${startDateTime} to ${endDateTime}`);
-
         await page.evaluate((start, end) => {
-            // Speed (Command 8)
             document.getElementById('speed_max').value = '55';
-            
-            // Date Formula
             document.getElementById('date9').value = start;
             document.getElementById('date10').value = end;
-            
-            // Trigger Events
             document.getElementById('date9').dispatchEvent(new Event('change'));
             document.getElementById('date10').dispatchEvent(new Event('change'));
-
-            // Options
             if(document.getElementById('ddlMinute')) document.getElementById('ddlMinute').value = '1';
             
-            // --- Select Truck ---
             var selectElement = document.getElementById('ddl_truck'); 
             var options = selectElement.options; 
             for (var i = 0; i < options.length; i++) { 
-                if (options[i].text.includes('ทั้งหมด')) { 
-                    selectElement.value = options[i].value; 
-                    break; 
-                } 
+                if (options[i].text.includes('ทั้งหมด')) { selectElement.value = options[i].value; break; } 
             } 
-            var event = new Event('change', { bubbles: true }); 
-            selectElement.dispatchEvent(event);
+            selectElement.dispatchEvent(new Event('change', { bubbles: true }));
         }, startDateTime, endDateTime);
 
-        // Search
         console.log('   Searching...');
         await page.evaluate(() => {
             if(typeof sertch_data === 'function') sertch_data();
             else document.querySelector("span[onclick='sertch_data();']").click();
         });
 
-        // Wait for Data Loading (HARD WAIT ADDED)
-        console.log('   ⏳ Waiting for Data Loading (300,000ms / 5 mins)...');
-        // บังคับรอ 5 นาทีเต็ม ตามที่ร้องขอ
+        console.log('   ⏳ Waiting for Data (300,000ms / 5 mins)...');
         await new Promise(resolve => setTimeout(resolve, 300000));
         
-        console.log('   ✅ Wait Complete. Checking for export button...');
-        try {
-            await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 });
-        } catch(e) {
-            console.warn('   ⚠️ Warning: Export button check timed out (Script will try to click anyway)');
-        }
-
-        // Export & Download
-        console.log('   Exporting...');
+        console.log('   Exporting Report 1...');
+        try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
         await page.evaluate(() => document.getElementById('btnexport').click());
         
-        // ใช้ Helper Function เพื่อเปลี่ยนชื่อไฟล์
         await waitForDownloadAndRename(downloadPath, 'Report1_OverSpeed.xls');
 
 
         // =================================================================
-        // STEP 3-6: Other Reports (Placeholder)
+        // STEP 3: REPORT 2 - Idling (จอดไม่ดับเครื่อง) [NEW]
         // =================================================================
-        // ... พื้นที่สำหรับวาง Code Report 2-5 ...
+        console.log('📊 Processing Report 2: Idling (จอดไม่ดับเครื่อง)...');
+        
+        // 1. ไปหน้า Report 02 ตามไฟล์อัด
+        await page.goto('https://gps.dtc.co.th/ultimate/Report/Report_02.php', { waitUntil: 'domcontentloaded' });
+        
+        // 2. รอ Elements
+        console.log('   Filling Form (Report 2)...');
+        await page.waitForSelector('#date9', { visible: true });
+        await page.waitForSelector('#date10', { visible: true });
+        // รอ Dropdown รถด้วยเพื่อความชัวร์ (แม้ไฟล์อัดไม่ได้เลือก แต่ควรเลือก "ทั้งหมด" เพื่อความครบถ้วน หรือปล่อย Default)
+        // จากไฟล์อัด ไม่มีการเลือก Dropdown รถ (ใช้ Default) ดังนั้นเราจะข้ามการเลือกทะเบียนรถไป หรือถ้าต้องการ "ทั้งหมด" ก็เพิ่ม Logic เดิมได้
+        // แต่เพื่อความปลอดภัยตามไฟล์แนบ จะเน้นแก้วันที่ครับ
+
+        await page.evaluate((start, end) => {
+            // ตั้งค่าวันที่ตามตัวแปร 06:00 - 18:00
+            document.getElementById('date9').value = start;
+            document.getElementById('date10').value = end;
+            
+            // Trigger Change Events
+            document.getElementById('date9').dispatchEvent(new Event('change'));
+            document.getElementById('date10').dispatchEvent(new Event('change'));
+        }, startDateTime, endDateTime);
+
+        // 3. กด Search (ตามไฟล์แนบ: td:nth-of-type(6) > span)
+        console.log('   Searching (Report 2)...');
+        await page.click('td:nth-of-type(6) > span');
+
+        // 4. Hard Wait 5 นาที (เพื่อความชัวร์แบบเดียวกับ Report 1)
+        console.log('   ⏳ Waiting for Data (300,000ms / 5 mins)...');
+        await new Promise(resolve => setTimeout(resolve, 300000));
+
+        // 5. Export (ตามไฟล์แนบ: #btnexport)
+        console.log('   Exporting Report 2...');
+        try {
+            await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 });
+        } catch(e) {
+            console.warn('   ⚠️ Warning: Export button check timed out (Report 2)');
+        }
+        
+        await page.evaluate(() => document.getElementById('btnexport').click());
+        
+        // 6. รอโหลดและเปลี่ยนชื่อ
+        await waitForDownloadAndRename(downloadPath, 'Report2_Idling.xls');
+
+
+        // =================================================================
+        // STEP 4-6: Other Reports (Placeholder)
+        // =================================================================
+        // ... พื้นที่สำหรับวาง Code Report 3-5 ...
 
 
         // =================================================================
@@ -195,20 +215,14 @@ function getTodayFormatted() {
         // =================================================================
         console.log('📧 Step 8: Sending Email...');
         
-        // อ่านไฟล์ทั้งหมดที่มีในโฟลเดอร์ตอนนี้
         const allFiles = fs.readdirSync(downloadPath);
-        
-        // กรองเฉพาะไฟล์ที่เราต้องการส่ง (ตัดไฟล์ระบบทิ้งถ้ามี)
         const validFiles = allFiles.filter(file => file.endsWith('.xls') || file.endsWith('.xlsx') || file.endsWith('.pdf'));
         
         const attachments = validFiles.map(file => {
             const filePath = path.join(downloadPath, file);
             const stats = fs.statSync(filePath);
             console.log(`   Attaching: ${file} (${stats.size} bytes)`);
-            return {
-                filename: file,
-                path: filePath
-            };
+            return { filename: file, path: filePath };
         });
 
         if (attachments.length > 0) {
