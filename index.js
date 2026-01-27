@@ -204,7 +204,7 @@ function extractDataFromReport(filePath, reportType) {
         await page.click('td:nth-of-type(6) > span');
         
         console.log('   ⏳ Waiting 4 mins...'); 
-        await new Promise(r => setTimeout(r, 240000)); 
+        await new Promise(r => setTimeout(r, 200000)); 
 
         await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button'));
