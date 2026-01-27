@@ -1,4 +1,4 @@
-name: Daily DTC 5 Report Day
+name: Run Daily DTC Report (06:05 AM)
 
 on:
   schedule:
@@ -9,7 +9,7 @@ on:
 jobs:
   run-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 15 # เผื่อเวลาดาวน์โหลด 5 รายงาน
+    timeout-minutes: 60 # ปรับเพิ่มเป็น 60 นาที เผื่อเวลารอโหลดรายงานยาวๆ
 
     steps:
       - name: Checkout code
@@ -38,7 +38,8 @@ jobs:
         with:
           name: downloaded-reports
           path: downloads/
-          
+          retention-days: 1
+
       - name: Upload Debug Screenshots
         if: always() # ทำงานเสมอ ไม่ว่าจะ Success หรือ Failed
         uses: actions/upload-artifact@v4
