@@ -111,7 +111,7 @@ function extractDataFromReport(filePath, reportType) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation (Report 4: Arrow Key Select)...');
+    console.log('🚀 Starting DTC Automation (Report 4: Type Search Fix)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -203,8 +203,8 @@ function extractDataFromReport(filePath, reportType) {
         }, startDateTime, endDateTime);
         await page.click('td:nth-of-type(6) > span');
         
-        console.log('   ⏳ Waiting 3 mins...'); 
-        await new Promise(r => setTimeout(r, 180000)); 
+        console.log('   ⏳ Waiting 4 mins...'); 
+        await new Promise(r => setTimeout(r, 240000)); 
 
         await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button'));
@@ -214,7 +214,7 @@ function extractDataFromReport(filePath, reportType) {
         const file3 = await waitForDownloadAndRename(downloadPath, 'Report3_SuddenBrake.xls');
 
         // =================================================================
-        // REPORT 4: Harsh Start (FIXED: Arrow Key Select)
+        // REPORT 4: Harsh Start (FIXED: Type "ทั้งหมด" in #s2id_autogen2)
         // =================================================================
         console.log('📊 Processing Report 4: Harsh Start...');
         try {
@@ -236,22 +236,33 @@ function extractDataFromReport(filePath, reportType) {
                 document.getElementById('date10').dispatchEvent(new Event('change'));
             }, startDateTime, endDateTime);
 
-            // 2. เลือกรถ (ใช้ ArrowDown + Enter)
-            const select2Exists = await page.$('#s2id_ddl_truck');
-            if (select2Exists) {
+            // 2. เลือกรถ (เปิด Dropdown -> หา input #s2id_autogen2 -> พิมพ์ "ทั้งหมด" -> Enter)
+            const select2Container = await page.$('#s2id_ddl_truck');
+            if (select2Container) {
                 console.log('   Found #s2id_ddl_truck, interacting with Select2...');
-                await page.click('#s2id_ddl_truck');
+                await select2Container.click(); // เปิด Dropdown
+                
                 try {
-                    // รอ Dropdown เปิด
+                    // รอ animation เปิด Dropdown
                     await new Promise(r => setTimeout(r, 1000));
-                    // กดลูกศรลง
-                    await page.keyboard.press('ArrowDown');
-                    await new Promise(r => setTimeout(r, 500));
-                    // กด Enter
-                    await page.keyboard.press('Enter');
-                    console.log('   Select2: Pressed ArrowDown + Enter.');
+                    
+                    // หาช่อง Input ตาม Recording (#s2id_autogen2) หรือ class ทั่วไป
+                    const searchInput = await page.$('#s2id_autogen2') || await page.$('.select2-input');
+                    
+                    if (searchInput) {
+                        console.log('   Found Select2 Search Input, typing "ทั้งหมด"...');
+                        await searchInput.type('ทั้งหมด');
+                        await new Promise(r => setTimeout(r, 1000));
+                        await page.keyboard.press('Enter');
+                        console.log('   Select2: Typed "ทั้งหมด" and pressed Enter.');
+                    } else {
+                        // ถ้าหา input ไม่เจอ ลองพิมพ์เลย (เพราะ focus มักจะอยู่ที่ input เมื่อเปิด)
+                        console.log('   Search Input not found explicitly, typing blindly...');
+                        await page.keyboard.type('ทั้งหมด');
+                        await page.keyboard.press('Enter');
+                    }
                 } catch (e) {
-                    console.warn('   ⚠️ Select2 interaction failed, trying default select fallback...');
+                    console.warn('   ⚠️ Select2 interaction failed:', e.message);
                 }
             } else {
                 console.log('   #s2id_ddl_truck not found, trying standard #ddl_truck...');
@@ -268,22 +279,15 @@ function extractDataFromReport(filePath, reportType) {
             // Debug 2
             await page.screenshot({ path: path.join(downloadPath, 'report4_02_before_search.png') });
 
-            // กดค้นหา (ใช้การเรียก Function โดยตรง เพื่อความชัวร์ที่สุด)
-            console.log('   Clicking Search Report 4 (Direct Function Call)...');
-            
-            await page.evaluate(() => {
-                if (typeof sertch_data === 'function') {
-                    console.log("Calling sertch_data() directly...");
-                    sertch_data();
-                } else {
-                    console.warn("sertch_data not found, clicking span...");
-                    document.querySelector('td:nth-of-type(6) > span').click();
-                }
-            });
+            // กดค้นหา (ใช้ Selector จาก Recording: td:nth-of-type(6) > span)
+            console.log('   Clicking Search Report 4...');
+            const searchSelector = 'td:nth-of-type(6) > span';
+            await page.waitForSelector(searchSelector, { visible: true });
+            await page.click(searchSelector);
 
-            // รอ 4 นาที (240s) พร้อม Log ทุก 1 นาที
-            console.log('   ⏳ Waiting 3 mins for Report 4 data...');
-            for (let i = 1; i <= 3; i++) {
+            // รอ 4 นาที (240s) พร้อม Log
+            console.log('   ⏳ Waiting 4 mins for Report 4 data...');
+            for (let i = 1; i <= 4; i++) {
                 await new Promise(r => setTimeout(r, 60000)); // รอ 1 นาที
                 console.log(`      ... Passed ${i} minute(s)`);
             }
@@ -301,6 +305,7 @@ function extractDataFromReport(filePath, reportType) {
                 if (btn) {
                     btn.click();
                 } else {
+                    // Fallback
                     const allBtns = Array.from(document.querySelectorAll('button'));
                     const excelBtn = allBtns.find(b => b.innerText.includes('Excel') || b.title === 'Excel');
                     if (excelBtn) excelBtn.click();
