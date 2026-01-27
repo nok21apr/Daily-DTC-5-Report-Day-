@@ -203,8 +203,8 @@ function extractDataFromReport(filePath, reportType) {
         }, startDateTime, endDateTime);
         await page.click('td:nth-of-type(6) > span');
         
-        console.log('   ⏳ Waiting 4 mins (Updated)...'); // ปรับเวลาเป็น 4 นาที
-        await new Promise(r => setTimeout(r, 240000)); // 240,000 ms
+        console.log('   ⏳ Waiting 4 mins (Updated)...'); // ปรับเวลาเป็น 3 นาที
+        await new Promise(r => setTimeout(r, 200000)); // 200,000 ms
 
         await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button'));
@@ -282,7 +282,7 @@ function extractDataFromReport(filePath, reportType) {
 
             // รอ 4 นาที (240s)
             console.log('   ⏳ Waiting 4 mins for Report 4 data (Updated)...');
-            await new Promise(r => setTimeout(r, 240000)); // 240,000 ms
+            await new Promise(r => setTimeout(r, 200000)); // 200,000 ms
 
             // Debug 3
             await page.screenshot({ path: path.join(downloadPath, 'report4_03_after_wait.png') });
