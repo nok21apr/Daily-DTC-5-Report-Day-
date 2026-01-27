@@ -10,7 +10,7 @@ async function waitForDownloadAndRename(downloadPath, newFileName) {
     console.log(`   Waiting for download: ${newFileName}...`);
     let downloadedFile = null;
 
-    // รอไฟล์สูงสุด 5 นาที (300 วินาที) เผื่อไฟล์ใหญ่มาก
+    // รอไฟล์สูงสุด 5 นาที (300 วินาที)
     for (let i = 0; i < 300; i++) {
         const files = fs.readdirSync(downloadPath);
         downloadedFile = files.find(f => 
@@ -52,7 +52,6 @@ function getTodayFormatted() {
     return new Intl.DateTimeFormat('en-CA', options).format(date);
 }
 
-// ฟังก์ชันแปลงเวลา "HH:mm:ss" เป็นนาที
 function parseDurationToMinutes(durationStr) {
     if (!durationStr || !durationStr.includes(':')) return 0;
     const parts = durationStr.split(':').map(Number);
@@ -112,7 +111,7 @@ function extractDataFromReport(filePath, reportType) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation (Report 4 Debug Mode)...');
+    console.log('🚀 Starting DTC Automation (Adjusted Wait Times to 4 Mins)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -164,7 +163,7 @@ function extractDataFromReport(filePath, reportType) {
             select.dispatchEvent(new Event('change', { bubbles: true }));
         }, startDateTime, endDateTime);
         await page.evaluate(() => { if(typeof sertch_data === 'function') sertch_data(); else document.querySelector("span[onclick='sertch_data();']").click(); });
-        await new Promise(r => setTimeout(r, 300000)); // 5 mins
+        await new Promise(r => setTimeout(r, 300000)); 
         try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
         await page.evaluate(() => document.getElementById('btnexport').click());
         const file1 = await waitForDownloadAndRename(downloadPath, 'Report1_OverSpeed.xls');
@@ -184,7 +183,7 @@ function extractDataFromReport(filePath, reportType) {
             if (select) { for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } select.dispatchEvent(new Event('change', { bubbles: true })); }
         }, startDateTime, endDateTime);
         await page.click('td:nth-of-type(6) > span');
-        await new Promise(r => setTimeout(r, 300000)); // 5 mins
+        await new Promise(r => setTimeout(r, 300000));
         try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
         await page.evaluate(() => document.getElementById('btnexport').click());
         const file2 = await waitForDownloadAndRename(downloadPath, 'Report2_Idling.xls');
@@ -203,7 +202,10 @@ function extractDataFromReport(filePath, reportType) {
             if (select) { for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } select.dispatchEvent(new Event('change', { bubbles: true })); }
         }, startDateTime, endDateTime);
         await page.click('td:nth-of-type(6) > span');
-        await new Promise(r => setTimeout(r, 240000)); // 4 mins
+        
+        console.log('   ⏳ Waiting 4 mins (Updated)...'); // ปรับเวลาเป็น 4 นาที
+        await new Promise(r => setTimeout(r, 240000)); // 240,000 ms
+
         await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button'));
             const b = btns.find(b => b.innerText.includes('Excel') || b.title === 'Excel');
@@ -212,41 +214,65 @@ function extractDataFromReport(filePath, reportType) {
         const file3 = await waitForDownloadAndRename(downloadPath, 'Report3_SuddenBrake.xls');
 
         // =================================================================
-        // REPORT 4: Harsh Start (Debug & Fixed Version)
+        // REPORT 4: Harsh Start (FIXED Select2)
         // =================================================================
         console.log('📊 Processing Report 4: Harsh Start...');
         try {
             await page.goto('https://gps.dtc.co.th/ultimate/Report/report_ha.php', { waitUntil: 'domcontentloaded' });
             
-            // Debug 1: ถึงหน้าเว็บหรือไม่
+            // Debug 1
             await page.screenshot({ path: path.join(downloadPath, 'report4_01_loaded.png') });
             
-            // รอวันที่โหลด (สำคัญ)
+            // รอวันที่
             await page.waitForSelector('#date9', { visible: true, timeout: 60000 });
 
-            // เช็คและเลือก Dropdown รถ (แบบปลอดภัย ไม่ Error ถ้าไม่เจอ)
-            console.log('   Setting Report 4 Conditions...');
+            console.log('   Setting Report 4 Conditions (ID: s2id_ddl_truck)...');
+            
+            // 1. ตั้งวันที่
             await page.evaluate((start, end) => {
-                // 1. วันที่
                 document.getElementById('date9').value = start;
                 document.getElementById('date10').value = end;
                 document.getElementById('date9').dispatchEvent(new Event('change'));
                 document.getElementById('date10').dispatchEvent(new Event('change'));
-                
-                // 2. รถทั้งหมด (ตรวจสอบก่อนว่ามี Element ไหม)
-                const truckSelect = document.getElementById('ddl_truck');
-                if (truckSelect) {
-                    for (let opt of truckSelect.options) {
-                        if (opt.text.includes('ทั้งหมด')) {
-                            truckSelect.value = opt.value;
-                            break;
-                        }
-                    }
-                    truckSelect.dispatchEvent(new Event('change', { bubbles: true }));
-                }
             }, startDateTime, endDateTime);
 
-            // Debug 2: ก่อนกดค้นหา
+            // 2. เลือกรถด้วย s2id_ddl_truck
+            // เช็คว่ามี Element นี้ไหม
+            const select2Exists = await page.$('#s2id_ddl_truck');
+            if (select2Exists) {
+                console.log('   Found #s2id_ddl_truck, interacting with Select2...');
+                await page.click('#s2id_ddl_truck'); // คลิกเปิด Dropdown
+                
+                // รอให้ช่อง Search ของ Select2 โผล่ (ปกติจะเป็น #select2-drop หรือ .select2-input)
+                // เราจะลองพิมพ์ "ทั้งหมด" ลงไป
+                try {
+                    // รอ Input ที่ Active หรืออยู่ใน Dropdown
+                    await new Promise(r => setTimeout(r, 500));
+                    await page.keyboard.type('ทั้งหมด');
+                    await new Promise(r => setTimeout(r, 1000));
+                    await page.keyboard.press('Enter');
+                    console.log('   Select2: Typed "ทั้งหมด" and pressed Enter.');
+                } catch (e) {
+                    console.warn('   ⚠️ Select2 interaction failed, trying default select fallback...');
+                }
+            } else {
+                // Fallback: ถ้าไม่ใช่ Select2 ลองใช้ ddl_truck ธรรมดา
+                console.log('   #s2id_ddl_truck not found, trying standard #ddl_truck...');
+                await page.evaluate(() => {
+                    const select = document.getElementById('ddl_truck');
+                    if (select) {
+                        for (let opt of select.options) {
+                            if (opt.text.includes('ทั้งหมด')) {
+                                select.value = opt.value;
+                                break;
+                            }
+                        }
+                        select.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                });
+            }
+
+            // Debug 2
             await page.screenshot({ path: path.join(downloadPath, 'report4_02_before_search.png') });
 
             // กดค้นหา
@@ -254,24 +280,22 @@ function extractDataFromReport(filePath, reportType) {
             await page.waitForSelector('td:nth-of-type(6) > span', { visible: true });
             await page.click('td:nth-of-type(6) > span');
 
-            // เพิ่มเวลาการรอเป็น 5 นาที (300 วินาที)
-            console.log('   ⏳ Waiting 4 mins for Report 4 data...');
-            await new Promise(r => setTimeout(r, 240000));
+            // รอ 4 นาที (240s)
+            console.log('   ⏳ Waiting 4 mins for Report 4 data (Updated)...');
+            await new Promise(r => setTimeout(r, 240000)); // 240,000 ms
 
-            // Debug 3: หลังรอ 5 นาที (ดูว่าข้อมูลมาไหม)
+            // Debug 3
             await page.screenshot({ path: path.join(downloadPath, 'report4_03_after_wait.png') });
 
             // กด Export
             console.log('   Clicking Export Report 4...');
             await page.evaluate(() => {
-                // Selector ตรงตาม Recording: #table > div > button ปุ่มที่ 3
                 const xpathResult = document.evaluate('//*[@id="table"]/div[1]/button[3]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
                 const btn = xpathResult.singleNodeValue;
                 
                 if (btn) {
                     btn.click();
                 } else {
-                    // Fallback: หาปุ่มที่มีคำว่า Excel
                     const allBtns = Array.from(document.querySelectorAll('button'));
                     const excelBtn = allBtns.find(b => b.innerText.includes('Excel') || b.title === 'Excel');
                     if (excelBtn) excelBtn.click();
@@ -284,7 +308,7 @@ function extractDataFromReport(filePath, reportType) {
         } catch (error) {
             console.error('❌ Report 4 Failed:', error.message);
             await page.screenshot({ path: path.join(downloadPath, 'report4_error_snapshot.png') });
-            throw error; // ส่ง Error ต่อเพื่อให้โปรแกรมหยุดถ้าจำเป็น หรือจะข้ามก็ได้
+            throw error; 
         }
 
         // Report 5: Forbidden
@@ -308,7 +332,7 @@ function extractDataFromReport(filePath, reportType) {
             for(var s of allSelects) { for(var i=0; i<s.options.length; i++) { if(s.options[i].text.includes('สถานีทั้งหมด')) { s.value = s.options[i].value; s.dispatchEvent(new Event('change', { bubbles: true })); break; } } }
         });
         await page.click('td:nth-of-type(7) > span');
-        await new Promise(r => setTimeout(r, 300000)); // 5 mins
+        await new Promise(r => setTimeout(r, 300000));
         try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
         await page.evaluate(() => document.getElementById('btnexport').click());
         const file5 = await waitForDownloadAndRename(downloadPath, 'Report5_ForbiddenParking.xls');
