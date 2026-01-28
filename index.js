@@ -258,7 +258,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         // =================================================================
         // REPORT 3: Sudden Brake
         // =================================================================
-        console.log('📊 Processing Report 3: Sudden Brake...');
+         console.log('📊 Processing Report 3: Sudden Brake...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/report_hd.php', { waitUntil: 'domcontentloaded' });
         await page.waitForSelector('#date9', { visible: true });
         await new Promise(r => setTimeout(r, 2000));
