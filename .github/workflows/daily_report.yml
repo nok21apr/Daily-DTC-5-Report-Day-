@@ -1,9 +1,10 @@
-name: Run Daily DTC Report (06:05 AM)
+name: Run Daily DTC Report (18:05 PM)
 
 on:
   schedule:
-    # 23:05 UTC = 06:05 Thailand Time (UTC+7)
-    - cron: '5 23 * * *'
+     # 18:05 เวลาไทย (UTC+7) = 11:05 UTC
+    - cron: '5 11 * * *'
+
   workflow_dispatch: # ปุ่มกดรันเองสำหรับทดสอบ
 
 jobs:
