@@ -122,6 +122,91 @@ function getTodayFormatted() {
     const options = { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Asia/Bangkok' };
     return new Intl.DateTimeFormat('en-CA', options).format(date);
 }
+// =================================================================
+// SPECIAL FUNCTION: Convert Report 5 (Forbidden Parking) with Full Formatting
+// =================================================================
+async function convertReport5ToExcel(sourcePath, destPath) {
+    try {
+        console.log(`   🎨 Converting Report 5 with Full Formatting...`);
+        const content = fs.readFileSync(sourcePath, 'utf-8');
+        
+        // ถ้าไม่ใช่ HTML ให้ Copy เลย
+        if (!content.trim().startsWith('<')) {
+             fs.copyFileSync(sourcePath, destPath);
+             return;
+        }
+
+        const dom = new JSDOM(content);
+        const table = dom.window.document.querySelector('table');
+        
+        if (!table) {
+             fs.copyFileSync(sourcePath, destPath);
+             return;
+        }
+
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Forbidden Parking');
+        
+        // ดึงทุกแถว (TR) โดยไม่มีการข้าม
+        const rows = Array.from(table.querySelectorAll('tr'));
+
+        rows.forEach((row, rowIndex) => {
+            const cells = Array.from(row.querySelectorAll('td, th'));
+            const rowData = cells.map(cell => cell.textContent.replace(/<[^>]*>/g, '').trim());
+            
+            // เพิ่มแถวลงใน Excel
+            const excelRow = worksheet.addRow(rowData);
+
+            // --- จัดรูปแบบ (Formatting Logic) ---
+            excelRow.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+                // 1. ตั้งค่า Font เริ่มต้น
+                cell.font = { name: 'Angsana New', size: 14 };
+
+                // 2. กรณีเป็น 4 บรรทัดแรก (หัวกระดาษ)
+                if (rowIndex < 4) {
+                    cell.font = { bold: true, size: 16 };
+                    cell.alignment = { vertical: 'middle', horizontal: 'left' }; // จัดชิดซ้ายหรือกลางตามความเหมาะสม
+                    // หมายเหตุ: การ Merge Cell จาก HTML อัตโนมัติทำได้ยาก ถ้าระบบไม่ได้ส่งค่า colspan มาชัดเจน
+                    // แต่ข้อมูลจะถูกนำมาใส่ครบแน่นอน
+                } 
+                // 3. กรณีเป็นบรรทัดหัวตาราง (มักจะเป็นบรรทัดที่ 5 หรือที่มี TH)
+                else if (rowIndex === 4 || cells[colNumber-1].tagName === 'TH') {
+                    cell.font = { bold: true, size: 14 };
+                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD3D3D3' } }; // สีเทาอ่อน
+                    cell.border = {
+                        top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' }
+                    };
+                    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+                }
+                // 4. กรณีเป็นข้อมูลเนื้อหา (Data Rows)
+                else {
+                    cell.border = {
+                        top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' }
+                    };
+                    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true }; // จัดกึ่งกลางตามที่ขอ
+                }
+            });
+        });
+
+        // --- Auto-fit Columns (ปรับความกว้าง) ---
+        worksheet.columns.forEach(column => {
+            let maxLength = 0;
+            column.eachCell({ includeEmpty: true }, function(cell) {
+                const columnLength = cell.value ? cell.value.toString().length : 10;
+                if (columnLength > maxLength) maxLength = columnLength;
+            });
+            // ปรับขนาด (คูณ 1.2 เพื่อเผื่อช่องว่าง)
+            column.width = Math.min(Math.max(maxLength * 1.2, 10), 60);
+        });
+
+        await workbook.xlsx.writeFile(destPath);
+        console.log(`   ✅ Report 5 Converted & Formatted: ${path.basename(destPath)}`);
+
+    } catch (e) {
+        console.warn(`   ⚠️ Report 5 Conversion Failed: ${e.message}`);
+        fs.copyFileSync(sourcePath, destPath);
+    }
+}
 
 // ฟังก์ชันแปลงเวลา "HH:mm:ss" เป็นนาที
 function parseDurationToMinutes(durationStr) {
@@ -439,76 +524,83 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         
         await waitForDownloadAndRename(downloadPath, 'Report4_HarshStart.xls');
 
+        // =================================================================
+// STEP 6: REPORT 5 - Forbidden Parking (พื้นที่ห้ามจอด/เข้าสถานี)
+// =================================================================
 
-        // =================================================================
-        // STEP 6: REPORT 5 - Forbidden Parking (พื้นที่ห้ามจอด/เข้าสถานี)
-        // =================================================================
         console.log('📊 Processing Report 5: Forbidden Parking...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/Report_Instation.php', { waitUntil: 'domcontentloaded' });
-        
         await page.waitForSelector('#date9', { visible: true });
-        await page.waitForSelector('#ddl_truck', { visible: true });
-        await new Promise(r => setTimeout(r, 2000));
+        
+        // รอ Dropdown รถ
+        await page.waitForFunction(() => {
+            const s = document.getElementById('ddl_truck');
+            return s && s.options.length > 1; 
+        }, { timeout: 60000 });
 
+        // ตั้งค่าตัวกรอง
         await page.evaluate((start, end) => {
-            // 1. วันที่
             document.getElementById('date9').value = start;
             document.getElementById('date10').value = end;
             document.getElementById('date9').dispatchEvent(new Event('change'));
             document.getElementById('date10').dispatchEvent(new Event('change'));
-
-            // 2. เลือกทะเบียน "ทั้งหมด" (Updated)
-            var truckSelect = document.getElementById('ddl_truck'); 
-            if (truckSelect) {
-                for (var i = 0; i < truckSelect.options.length; i++) { 
-                    if (truckSelect.options[i].text.includes('ทั้งหมด')) { truckSelect.value = truckSelect.options[i].value; break; } 
-                } 
-                truckSelect.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-
-            // 3. เลือกประเภทสถานี "พื้นที่ห้ามเข้า" (Updated)
-            // ค้นหา Select Element ทุกตัว เพื่อหาตัวที่มี Option นี้
-            var allSelects = document.getElementsByTagName('select');
-            for(var s of allSelects) {
-                for(var i=0; i<s.options.length; i++) {
-                    if(s.options[i].text.includes('พื้นที่ห้ามเข้า')) {
-                        s.value = s.options[i].value;
-                        s.dispatchEvent(new Event('change', { bubbles: true }));
-                        break;
+            
+            // เลือก "ทั้งหมด"
+            const select = document.getElementById('ddl_truck');
+            if(select) { 
+                for(let i=0; i<select.options.length; i++) {
+                    if(select.options[i].text.includes('ทั้งหมด') || select.options[i].text.toLowerCase().includes('all')) {
+                        select.selectedIndex = i; break; 
                     }
                 }
+                select.dispatchEvent(new Event('change', { bubbles: true })); 
+            }
+            
+            // เลือก "พื้นที่ห้ามเข้า" (Forbidden)
+            const allSelects = document.getElementsByTagName('select');
+            for(let s of allSelects) { 
+                for(let i=0; i<s.options.length; i++) { 
+                    if(s.options[i].text.includes('พื้นที่ห้ามเข้า')) { 
+                        s.value = s.options[i].value; 
+                        s.dispatchEvent(new Event('change', { bubbles: true })); 
+                        break; 
+                    } 
+                } 
             }
         }, startDateTime, endDateTime);
 
-        // รอสักครู่เพื่อให้ Dropdown สถานีโหลดใหม่ตามประเภท
         await new Promise(r => setTimeout(r, 2000));
-
+        
+        // เลือก "สถานีทั้งหมด"
         await page.evaluate(() => {
-            // 4. เลือกสถานี "สถานีทั้งหมด" (Updated)
-            var allSelects = document.getElementsByTagName('select');
-            for(var s of allSelects) {
-                for(var i=0; i<s.options.length; i++) {
-                    if(s.options[i].text.includes('สถานีทั้งหมด')) {
-                        s.value = s.options[i].value;
-                        s.dispatchEvent(new Event('change', { bubbles: true }));
-                        break;
-                    }
-                }
+            const allSelects = document.getElementsByTagName('select');
+            for(let s of allSelects) { 
+                for(let i=0; i<s.options.length; i++) { 
+                    if(s.options[i].text.includes('สถานีทั้งหมด')) { 
+                        s.value = s.options[i].value; 
+                        s.dispatchEvent(new Event('change', { bubbles: true })); 
+                        break; 
+                    } 
+                } 
             }
         });
 
-        console.log('   Searching Report 5...');
+        // กดค้นหา
         await page.click('td:nth-of-type(7) > span');
+        
+        // รอข้อมูล (ใช้ Hard Wait เพราะ Smart Wait เอาออกแล้ว)
+        console.log('   ⏳ Waiting 3 mins for Report 5 data...');
+        await new Promise(r => setTimeout(r, 180000));
 
-        console.log('   ⏳ Waiting 5 mins...');
-        await new Promise(resolve => setTimeout(resolve, 300000));
-
-        try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
-        console.log('   Exporting Report 5...');
+        // กด Export
         await page.evaluate(() => document.getElementById('btnexport').click());
         
-        await waitForDownloadAndRename(downloadPath, 'Report5_ForbiddenParking.xls');
+        // รอโหลดและใช้ฟังก์ชัน Convert แบบพิเศษ
+        const report5Raw = await waitForDownloadAndRename(downloadPath, 'Report5_ForbiddenParking.xls');
+        // เรียกใช้ฟังก์ชัน Convert พิเศษสำหรับ Report 5 (เขียนทับไฟล์ Converted เดิม)
+        await convertReport5ToExcel(report5Raw.replace('Converted_', 'DTC_Completed_').replace('.xlsx', '.xls'), report5Raw);
 
+        
         // =================================================================
         // STEP 7: Generate PDF Summary (Complete Logic)
         // =================================================================
