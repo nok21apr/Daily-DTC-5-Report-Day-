@@ -8,31 +8,26 @@ const ExcelJS = require('exceljs');
 
 // --- Helper Functions ---
 
-async function waitForDownloadAndRename(downloadPath, newFileName, maxWaitMs = 300000) {
+async function waitForDownloadAndRename(downloadPath, newFileName) {
     console.log(`   Waiting for download: ${newFileName}...`);
     let downloadedFile = null;
-    const checkInterval = 2000; 
-    let waittime = 0;
 
-    while (waittime < maxWaitMs) {
+    // รอไฟล์สูงสุด 5 นาที (300 วินาที) เผื่อไฟล์ใหญ่มาก
+    for (let i = 0; i < 300; i++) {
         const files = fs.readdirSync(downloadPath);
         downloadedFile = files.find(f => 
             (f.endsWith('.xls') || f.endsWith('.xlsx')) && 
             !f.endsWith('.crdownload') && 
-            !f.startsWith('DTC_Completed_') &&
-            !f.startsWith('Converted_')
+            !f.startsWith('DTC_Completed_')
         );
         
-        if (downloadedFile) {
-            console.log(`   ✅ File detected: ${downloadedFile} (${waittime/1000}s)`);
-            break; 
-        }
-        
-        await new Promise(resolve => setTimeout(resolve, checkInterval));
-        waittime += checkInterval;
+        if (downloadedFile) break;
+        await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
-    if (!downloadedFile) throw new Error(`Download timeout for ${newFileName}`);
+    if (!downloadedFile) {
+        throw new Error(`Download failed or timed out for ${newFileName}`);
+    }
 
     await new Promise(resolve => setTimeout(resolve, 3000));
 
@@ -53,20 +48,6 @@ async function waitForDownloadAndRename(downloadPath, newFileName, maxWaitMs = 3
     await convertHtmlToExcel(newPath, xlsxPath);
 
     return xlsxPath;
-}
-
-// ฟังก์ชันรอให้ตารางมีข้อมูล
-async function waitForTableData(page, minRows = 2, timeout = 300000) {
-    console.log(`   Waiting for table data (Max ${timeout/1000}s)...`);
-    try {
-        await page.waitForFunction((min) => {
-            const rows = document.querySelectorAll('table tr');
-            return rows.length >= min; 
-        }, { timeout: timeout }, minRows);
-        console.log('   ✅ Table data populated.');
-    } catch (e) {
-        console.warn('   ⚠️ Wait for table data timed out (Data might be empty).');
-    }
 }
 
 async function convertHtmlToExcel(sourcePath, destPath) {
