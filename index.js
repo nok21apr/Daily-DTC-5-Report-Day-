@@ -5,11 +5,10 @@ const nodemailer = require('nodemailer');
 const { JSDOM } = require('jsdom');
 const archiver = require('archiver');
 const { parse } = require('csv-parse/sync');
-const ExcelJS = require('exceljs');
 
 // --- Helper Functions ---
 
-// 1. ฟังก์ชันรอโหลดไฟล์ และแปลงเป็น CSV ทั้งหมด
+// 1. ฟังก์ชันรอโหลดไฟล์ และแปลงเป็น CSV (บังคับ CSV ทุกไฟล์)
 async function waitForDownloadAndRename(downloadPath, newFileName, maxWaitMs = 300000) {
     console.log(`   Waiting for download: ${newFileName}...`);
     let downloadedFile = null;
@@ -37,20 +36,19 @@ async function waitForDownloadAndRename(downloadPath, newFileName, maxWaitMs = 3
 
     if (!downloadedFile) throw new Error(`Download timeout for ${newFileName}`);
 
-    await new Promise(resolve => setTimeout(resolve, 10000)); // รอเขียนไฟล์
+    await new Promise(resolve => setTimeout(resolve, 5000)); // รอเขียนไฟล์
 
     const oldPath = path.join(downloadPath, downloadedFile);
     const finalFileName = `DTC_Completed_${newFileName}`;
     const newPath = path.join(downloadPath, finalFileName);
     
-    // ตรวจสอบขนาดไฟล์
     const stats = fs.statSync(oldPath);
     if (stats.size === 0) throw new Error(`Downloaded file is empty!`);
 
     if (fs.existsSync(newPath)) fs.unlinkSync(newPath);
     fs.renameSync(oldPath, newPath);
     
-    // แปลงทุกไฟล์เป็น CSV (UTF-8)
+    // แปลงเป็น CSV (UTF-8) เสมอ
     const csvFileName = `Converted_${newFileName.replace('.xls', '.csv')}`;
     const csvPath = path.join(downloadPath, csvFileName);
     await convertHtmlToCsv(newPath, csvPath);
@@ -74,7 +72,7 @@ async function waitForTableData(page, minRows = 2, timeout = 300000) {
     }
 }
 
-// 3. แปลง HTML -> CSV (ใช้ได้กับทุก Report)
+// 3. แปลง HTML -> CSV
 async function convertHtmlToCsv(sourcePath, destPath) {
     try {
         console.log(`   🔄 Converting HTML to CSV...`);
@@ -83,7 +81,6 @@ async function convertHtmlToCsv(sourcePath, destPath) {
         const table = dom.window.document.querySelector('table');
 
         if (!table) {
-             // กรณีไฟล์ไม่ใช่ HTML Table (อาจเป็น Binary) ให้ copy ไปเลย (แต่อาจจะอ่านไม่ได้ด้วย csv-parse)
              console.warn('   ⚠️ No HTML table found. Copying original file.');
              fs.copyFileSync(sourcePath, destPath);
              return;
@@ -95,11 +92,8 @@ async function convertHtmlToCsv(sourcePath, destPath) {
         rows.forEach(row => {
             const cells = Array.from(row.querySelectorAll('td, th'));
             const rowData = cells.map(cell => {
-                // ลบ space เกิน, tab, new line
                 let text = cell.textContent.replace(/\s+/g, ' ').trim();
-                // Escape double quotes
                 if (text.includes('"')) text = text.replace(/"/g, '""');
-                // ครอบด้วย quotes ถ้ามี comma หรือ quote
                 if (text.includes(',') || text.includes('"')) text = `"${text}"`;
                 return text;
             });
@@ -119,79 +113,64 @@ function getTodayFormatted() {
     return new Intl.DateTimeFormat('en-CA', options).format(date);
 }
 
-function parseDurationToMinutes(durationStr) {
-    if (!durationStr) return 0;
-    // รองรับ 00:00:00 หรือ 00:00
-    const match = durationStr.match(/(\d+):(\d+)(?::(\d+))?/);
-    if (!match) return 0;
-    const h = parseInt(match[1], 10);
-    const m = parseInt(match[2], 10);
-    const s = match[3] ? parseInt(match[3], 10) : 0;
-    return (h * 60) + m + (s / 60);
+// --- HELPER: แปลงเวลาไทย/HH:MM:SS เป็นวินาที (จากโค้ดใหม่) ---
+function parseDurationToSeconds(timeStr) {
+    if (!timeStr) return 0;
+    
+    // กรณี 1: "0 ชม. 1 นาที 31 วินาที"
+    const thaiMatch = timeStr.match(/(?:(\d+)\s*ชม\.)?\s*(?:(\d+)\s*นาที)?\s*(?:(\d+)\s*วินาที)?/);
+    if (thaiMatch && timeStr.includes('นาที')) {
+        const h = parseInt(thaiMatch[1] || 0);
+        const m = parseInt(thaiMatch[2] || 0);
+        const s = parseInt(thaiMatch[3] || 0);
+        return (h * 3600) + (m * 60) + s;
+    }
+
+    // กรณี 2: "00:11:19" (HH:MM:SS)
+    if (timeStr.includes(':')) {
+        const parts = timeStr.split(':').map(Number);
+        if (parts.length === 3) return (parts[0] * 3600) + (parts[1] * 60) + parts[2];
+        if (parts.length === 2) return (parts[0] * 60) + parts[1]; // MM:SS
+    }
+
+    return 0;
 }
 
-// *** UNIVERSAL DATA EXTRACTOR (รองรับ CSV ทุกรูปแบบ) ***
-async function extractDataUniversal(filePath, reportType) {
+// --- HELPER: แปลงวินาทีกลับเป็น HH:MM:SS (จากโค้ดใหม่) ---
+function formatSeconds(totalSeconds) {
+    const h = Math.floor(totalSeconds / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
+    const s = totalSeconds % 60;
+    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+}
+
+// --- FUNCTION: อ่านและประมวลผล CSV (จากโค้ดใหม่) ---
+function processCSV(filePath, skipLines, colMap) {
     try {
         if (!fs.existsSync(filePath)) return [];
         
-        // อ่านไฟล์ CSV
         const fileContent = fs.readFileSync(filePath, 'utf8');
-        const rows = parse(fileContent, {
-            columns: false, 
+        // ข้ามบรรทัด Header ด้านบน
+        const lines = fileContent.split('\n').slice(skipLines).join('\n');
+        
+        const records = parse(lines, {
+            columns: false,
             skip_empty_lines: true,
             relax_column_count: true
         });
 
-        const data = [];
-        
-        // Process Data
-        rows.forEach((cells, rowIndex) => {
-            // ข้าม Header: Report 5 มักมี Header 4-5 แถว, อื่นๆ 2 แถว
-            // ใช้ Logic ตรวจสอบว่าแถวนี้มีข้อมูลทะเบียนรถไหม ถ้ามีถึงเริ่มเก็บ
-            const plateRegex = /[0-9]{1,3}-[0-9]{1,4}|[0-9]?[ก-ฮ]{1,3}-[0-9]{1,4}/; 
-            const timeRegex = /\d{1,2}:\d{2}/; 
-
-            // 1. หาทะเบียน
-            const plateIndex = cells.findIndex(c => plateRegex.test(c) && c.length < 25 && !c.includes(':'));
-            if (plateIndex === -1) return; // ไม่เจอทะเบียน ข้ามแถวนี้
-            
-            const plate = cells[plateIndex];
-
-            // 2. หาเวลา (Duration)
-            // กรองหา cell ที่เป็นรูปแบบเวลาทั้งหมด
-            const timeCells = cells.filter(c => timeRegex.test(c));
-            let duration = "00:00:00";
-            if (timeCells.length > 0) {
-                 // สมมติว่าค่าสุดท้ายคือ Duration (เพราะ Start/End time มักมาก่อน)
-                 duration = timeCells[timeCells.length - 1];
+        return records.map(row => {
+            const data = {};
+            for (const [key, index] of Object.entries(colMap)) {
+                // index - 1 เพราะ array เริ่มที่ 0 แต่ colMap อาจจะอิง 1 (ปรับตามความเหมาะสม)
+                // ในที่นี้สมมติ colMap อิง 1-based index จาก Excel
+                const actualIndex = index - 1;
+                data[key] = row[actualIndex] ? row[actualIndex].trim() : '';
             }
-
-            if (reportType === 'speed' || reportType === 'idling') {
-                data.push({ plate, duration, durationMin: parseDurationToMinutes(duration) });
-            } 
-            else if (reportType === 'critical') {
-                // รายละเอียด: หา text ยาวๆ ที่ไม่ใช่ทะเบียน/เวลา อยู่หลังทะเบียน
-                let detail = cells.slice(plateIndex + 1).find(c => c.length > 3 && !timeRegex.test(c) && !plateRegex.test(c));
-                if (!detail) detail = "Critical Event";
-                data.push({ plate, detail });
-            } 
-            else if (reportType === 'forbidden') {
-                // ชื่อสถานี: หา text หลังทะเบียน
-                let station = "";
-                const possible = cells.slice(plateIndex + 1).filter(c => c.length > 2 && !timeRegex.test(c) && isNaN(c.replace(/[-/:\s]/g, '')));
-                if (possible.length > 0) station = possible[0];
-                else station = "Unknown Station";
-                
-                data.push({ plate, station, duration, durationMin: parseDurationToMinutes(duration) });
-            }
-        });
-
-        console.log(`      -> Extracted ${data.length} records from ${path.basename(filePath)}`);
-        return data;
-
-    } catch (e) {
-        console.warn(`   ⚠️ Extract Error ${path.basename(filePath)}: ${e.message}`);
+            return data;
+        }).filter(r => r.license); // กรองแถวว่างที่ไม่มีทะเบียนรถ/ชื่อรถ
+    } catch (err) {
+        console.error(`Error reading ${filePath}:`, err.message);
         return [];
     }
 }
@@ -221,7 +200,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation (All CSV Conversion)...');
+    console.log('🚀 Starting DTC Automation (Revise PDF Logic)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -254,15 +233,18 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         const todayStr = getTodayFormatted();
         const startDateTime = `${todayStr} 06:00`;
         const endDateTime = `${todayStr} 18:00`;
-        console.log(`🕒 Global Time Settings: ${startDateTime} to ${endDateTime}`);
-
-        // --- Step 2 to 6: STRICTLY PRESERVED FROM YOUR UPLOAD ---
         
-        // REPORT 1: Over Speed
+        // --- REPORT 1: Over Speed ---
         console.log('📊 Processing Report 1: Over Speed...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/Report_03.php', { waitUntil: 'domcontentloaded' });
         await page.waitForSelector('#speed_max', { visible: true });
-        await new Promise(r => setTimeout(r, 10000));
+        
+        // รอ Dropdown รถ
+        await page.waitForFunction(() => {
+            const s = document.getElementById('ddl_truck');
+            return s && s.options.length > 1; 
+        }, { timeout: 60000 });
+
         await page.evaluate((start, end) => {
             document.getElementById('speed_max').value = '55';
             document.getElementById('date9').value = start;
@@ -278,10 +260,10 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             select.dispatchEvent(new Event('change', { bubbles: true }));
         }, startDateTime, endDateTime);
         await page.evaluate(() => { if(typeof sertch_data === 'function') sertch_data(); else document.querySelector("span[onclick='sertch_data();']").click(); });
-        await new Promise(r => setTimeout(r, 300000)); 
+        await waitForTableData(page, 2, 300000); 
         try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
         await page.evaluate(() => document.getElementById('btnexport').click());
-        // Convert to CSV
+        // Return CSV Path
         const file1 = await waitForDownloadAndRename(downloadPath, 'Report1_OverSpeed.xls');
 
         // REPORT 2: Idling
@@ -299,10 +281,8 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             if (select) { for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } select.dispatchEvent(new Event('change', { bubbles: true })); }
         }, startDateTime, endDateTime);
         await page.click('td:nth-of-type(6) > span');
-        await new Promise(r => setTimeout(r, 300000));
-        try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
+        await waitForTableData(page, 2, 180000);
         await page.evaluate(() => document.getElementById('btnexport').click());
-        // Convert to CSV
         const file2 = await waitForDownloadAndRename(downloadPath, 'Report2_Idling.xls');
 
         // REPORT 3: Sudden Brake
@@ -319,14 +299,12 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             if (select) { for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } select.dispatchEvent(new Event('change', { bubbles: true })); }
         }, startDateTime, endDateTime);
         await page.click('td:nth-of-type(6) > span');
-        console.log('   ⏳ Waiting 3 mins...'); 
-        await new Promise(r => setTimeout(r, 180000)); 
+        await waitForTableData(page, 2, 180000); 
         await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button'));
             const b = btns.find(b => b.innerText.includes('Excel') || b.title === 'Excel');
             if (b) b.click(); else document.querySelector('#table button:nth-of-type(3)')?.click();
         });
-        // Convert to CSV
         const file3 = await waitForDownloadAndRename(downloadPath, 'Report3_SuddenBrake.xls');
 
         // REPORT 4: Harsh Start
@@ -360,8 +338,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             await page.evaluate(() => {
                 if (typeof sertch_data === 'function') { sertch_data(); } else { document.querySelector('td:nth-of-type(6) > span').click(); }
             });
-            console.log('   ⏳ Waiting 3 mins for Report 4 data...');
-            for (let i = 1; i <= 3; i++) { await new Promise(r => setTimeout(r, 60000)); console.log(`       ... Passed ${i} minute(s)`); }
+            await waitForTableData(page, 2, 180000); 
             console.log('   Clicking Export Report 4...');
             await page.evaluate(() => {
                 const xpathResult = document.evaluate('//*[@id="table"]/div[1]/button[3]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
@@ -373,7 +350,6 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                     if (excelBtn) excelBtn.click(); else throw new Error("Cannot find Export button for Report 4");
                 }
             });
-            // Convert to CSV
             const file4 = await waitForDownloadAndRename(downloadPath, 'Report4_HarshStart.xls');
         } catch (error) {
             console.error('❌ Report 4 Failed:', error.message);
@@ -415,174 +391,293 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             for(var s of allSelects) { for(var i=0; i<s.options.length; i++) { if(s.options[i].text.includes('สถานีทั้งหมด')) { s.value = s.options[i].value; s.dispatchEvent(new Event('change', { bubbles: true })); break; } } }
         });
         await page.click('td:nth-of-type(7) > span');
-        await new Promise(r => setTimeout(r, 300000));
+        await waitForTableData(page, 2, 180000); 
         try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
         await page.evaluate(() => document.getElementById('btnexport').click());
-        // Convert to CSV
         const file5 = await waitForDownloadAndRename(downloadPath, 'Report5_ForbiddenParking.xls');
 
         // =================================================================
-        // STEP 7: Generate PDF Summary (FROM CSV)
+        // STEP 7: Generate PDF Summary (UPDATED FROM YOUR CODE)
         // =================================================================
         console.log('📑 Step 7: Generating PDF Summary...');
 
-        const fileMap = {
-            'speed': path.join(downloadPath, 'Converted_Report1_OverSpeed.csv'),
-            'idling': path.join(downloadPath, 'Converted_Report2_Idling.csv'),
-            'brake': path.join(downloadPath, 'Converted_Report3_SuddenBrake.csv'),
-            'start': path.join(downloadPath, 'Converted_Report4_HarshStart.csv'),
-            'forbidden': path.join(downloadPath, 'Converted_Report5_ForbiddenParking.csv')
-        };
+        // 1. Process Report 1: Over Speed (Group by Car, Count, Sum Time)
+        // Note: CSV file1 is path.join(downloadPath, 'Converted_Report1_OverSpeed.csv')
+        // skipLines must match the HTML structure. Report 1 usually 2-5 lines.
+        // I'll try 5 as per your snippet.
+        const rawSpeed = processCSV(file1, 5, { license: 1, duration: 4 }); 
+        const speedStats = {};
+        rawSpeed.forEach(r => {
+            if (!speedStats[r.license]) speedStats[r.license] = { count: 0, time: 0, license: r.license };
+            speedStats[r.license].count++;
+            speedStats[r.license].time += parseDurationToSeconds(r.duration);
+        });
+        const topSpeed = Object.values(speedStats).sort((a, b) => b.count - a.count).slice(0, 5);
+        const totalOverSpeed = rawSpeed.length;
 
-        // Extract Data using new CSV Universal Extractor
-        const speedData = await extractDataUniversal(fileMap.speed, 'speed');
-        const idlingData = await extractDataUniversal(fileMap.idling, 'idling');
-        const brakeData = await extractDataUniversal(fileMap.brake, 'critical');
-        let startData = [];
-        try { startData = await extractDataUniversal(fileMap.start, 'critical'); } catch(e){}
-        const forbiddenData = await extractDataUniversal(fileMap.forbidden, 'forbidden');
+        // 2. Process Report 2: Idling
+        // Skip lines 6
+        const rawIdling = processCSV(file2, 6, { license: 1, duration: 4 });
+        const idleStats = {};
+        rawIdling.forEach(r => {
+            if (!idleStats[r.license]) idleStats[r.license] = { count: 0, time: 0, license: r.license };
+            idleStats[r.license].count++;
+            idleStats[r.license].time += parseDurationToSeconds(r.duration);
+        });
+        const topIdle = Object.values(idleStats).sort((a, b) => b.time - a.time).slice(0, 5);
+        const maxIdleCar = topIdle.length > 0 ? topIdle[0] : { time: 0, license: '-' };
 
-        // Aggregation Logic (Top 5)
-        const processStats = (data, key) => {
-            const stats = {};
-            data.forEach(d => {
-                if (!d.plate) return;
-                if (!stats[d.plate]) stats[d.plate] = { count: 0, durationMin: 0 };
-                stats[d.plate].count++;
-                if (d.durationMin) stats[d.plate].durationMin += d.durationMin;
-            });
-            return Object.entries(stats)
-                .map(([plate, val]) => ({ plate, ...val }))
-                .sort((a, b) => key === 'count' ? b.count - a.count : b.durationMin - a.durationMin)
-                .slice(0, 5);
-        };
-
-        const topSpeed = processStats(speedData, 'count');
-        const topIdling = processStats(idlingData, 'durationMin');
-        const topForbidden = processStats(forbiddenData, 'durationMin');
-        const totalCritical = brakeData.length + startData.length;
+        // 3. Process Report 3 & 4: Critical Events
+        // Skip 4 lines. Col 2=License, Col 4=Start Speed, Col 5=End Speed
+        // Need to check if file3/file4 exist (file4 might be undefined if skipped)
+        const rawBrake = fs.existsSync(file3) ? processCSV(file3, 4, { license: 2, v_start: 4, v_end: 5 }) : [];
+        const rawStart = (typeof file4 !== 'undefined' && fs.existsSync(file4)) ? processCSV(file4, 4, { license: 2, v_start: 4, v_end: 5 }) : [];
         
-        const maxIdling = topIdling.length > 0 ? topIdling[0] : { plate: '-', durationMin: 0 };
+        const criticalEvents = [
+            ...rawBrake.map(r => ({ ...r, type: 'Sudden Brake', level: 'High' })),
+            ...rawStart.map(r => ({ ...r, type: 'Harsh Start', level: 'Medium' }))
+        ];
 
-        // Formatter
-        const formatDuration = (mins) => {
-            if (!mins) return "00:00:00";
-            const h = Math.floor(mins / 60);
-            const m = Math.floor(mins % 60);
-            const s = Math.floor((mins * 60) % 60);
-            return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
-        };
+        // 4. Process Report 5: Prohibited Parking
+        // Skip 1 line (Header at 0). Col 1=License, 4=Station, 9=Duration (Need to verify column index in CSV)
+        // Usually HTML -> CSV via jsdom preserves column order. 
+        // Let's assume Col index 1=License, 4=Station, 9=Total Time based on your snippet.
+        const rawForbidden = processCSV(file5, 1, { license: 1, station: 4, duration: 9 });
+        const forbiddenList = rawForbidden.map(r => ({
+            license: r.license,
+            station: r.station,
+            timeSec: parseDurationToSeconds(r.duration),
+            timeStr: r.duration
+        })).sort((a, b) => b.timeSec - a.timeSec).slice(0, 8); // Top 8 list
 
-        // HTML Template (Matching FleetSafetyReportv2.tex.pdf)
-        const htmlContent = `
+        // Stats for chart
+        const forbiddenChartStats = {};
+        rawForbidden.forEach(r => {
+            if(!forbiddenChartStats[r.license]) forbiddenChartStats[r.license] = 0;
+            forbiddenChartStats[r.license] += parseDurationToSeconds(r.duration);
+        });
+        const topForbiddenChart = Object.entries(forbiddenChartStats)
+            .map(([license, time]) => ({ license, time }))
+            .sort((a, b) => b.time - a.time).slice(0, 5);
+
+        // --- HTML GENERATION ---
+        const html = `
         <!DOCTYPE html>
-        <html lang="th">
+        <html>
         <head>
-            <meta charset="UTF-8">
-            <script src="https://cdn.tailwindcss.com"></script>
-            <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
             <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@300;400;600;700&display=swap" rel="stylesheet">
             <style>
-                body { font-family: 'Noto Sans Thai', sans-serif; background: #fff; color: #333; }
-                .page-break { page-break-after: always; }
-                .header-blue { background-color: #1e40af; color: white; padding: 12px 20px; border-radius: 8px; margin-bottom: 24px; font-weight: bold; }
-                .card { background: #f0f9ff; border-radius: 12px; padding: 24px; text-align: center; border: 1px solid #bae6fd; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
-                .card h3 { color: #0c4a6e; font-weight: bold; font-size: 1.1rem; margin-bottom: 8px; }
-                .card .val { font-size: 3rem; font-weight: 800; margin: 8px 0; }
-                table { width: 100%; border-collapse: collapse; margin-top: 24px; font-size: 0.9rem; }
-                th { background-color: #1e40af; color: white; padding: 12px; text-align: left; border-bottom: 2px solid #1e3a8a; }
-                td { padding: 10px 12px; border-bottom: 1px solid #e2e8f0; }
-                tr:nth-child(even) { background-color: #f8fafc; }
-                .chart-container { height: 300px; margin-bottom: 30px; }
+            @page { size: A4; margin: 0; }
+            body { font-family: 'Noto Sans Thai', sans-serif; margin: 0; padding: 0; background: #fff; color: #333; }
+            .page { width: 210mm; height: 296mm; position: relative; page-break-after: always; overflow: hidden; }
+            .content { padding: 40px; }
+            
+            /* Headers */
+            .header-banner { background: #1E40AF; color: white; padding: 15px 40px; font-size: 24px; font-weight: bold; margin-bottom: 30px; }
+            h1 { font-size: 32px; color: #1E40AF; margin-bottom: 10px; }
+            
+            /* Grid Cards */
+            .grid-2x2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 50px; }
+            .card { background: #F8FAFC; border-radius: 12px; padding: 30px; text-align: center; border: 1px solid #E2E8F0; }
+            .card-title { font-size: 18px; font-weight: bold; margin-bottom: 10px; }
+            .card-value { font-size: 48px; font-weight: bold; margin: 10px 0; }
+            .card-sub { font-size: 14px; color: #64748B; }
+            
+            /* Colors */
+            .c-blue { color: #1E40AF; }
+            .c-orange { color: #F59E0B; }
+            .c-red { color: #DC2626; }
+            .c-purple { color: #9333EA; }
+            
+            /* Charts */
+            .chart-container { margin: 40px 0; }
+            .bar-row { display: flex; align-items: center; margin-bottom: 15px; }
+            .bar-label { width: 180px; text-align: right; padding-right: 15px; font-weight: 600; font-size: 14px; }
+            .bar-track { flex-grow: 1; background: #F1F5F9; height: 30px; border-radius: 4px; overflow: hidden; }
+            .bar-fill { height: 100%; display: flex; align-items: center; justify-content: flex-end; padding-right: 10px; color: white; font-size: 12px; font-weight: bold; }
+            
+            /* Tables */
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            th { background: #1E40AF; color: white; padding: 12px; text-align: left; }
+            td { padding: 10px; border-bottom: 1px solid #E2E8F0; }
+            tr:nth-child(even) { background: #F8FAFC; }
+            .risk-High { color: #DC2626; font-weight: bold; }
+            .risk-Medium { color: #F59E0B; font-weight: bold; }
             </style>
         </head>
-        <body class="p-10">
-            <!-- PAGE 1: Summary -->
-            <div class="page-break">
-                <div class="text-center mb-16 mt-10">
-                    <h1 class="text-4xl font-bold text-blue-900 mb-2">รายงานสรุปพฤติกรรมการขับขี่</h1>
-                    <h2 class="text-2xl text-gray-600">Fleet Safety & Telematics Analysis Report</h2>
-                    <p class="text-xl mt-6 text-gray-500">วันที่: ${todayStr} (06:00 - 18:00)</p>
-                </div>
-                <div class="grid grid-cols-2 gap-8 px-10">
-                    <div class="card">
-                        <h3>Over Speed (ครั้ง)</h3>
-                        <div class="val text-blue-700">${speedData.length}</div>
-                    </div>
-                    <div class="card" style="background-color: #fff7ed; border-color: #fed7aa;">
-                        <h3 style="color: #9a3412;">Max Idling (นาที)</h3>
-                        <div class="val text-orange-600">${maxIdling.durationMin.toFixed(0)}</div>
-                        <p class="text-gray-500">${maxIdling.plate}</p>
-                    </div>
-                    <div class="card" style="background-color: #fef2f2; border-color: #fecaca;">
-                        <h3 style="color: #991b1b;">Critical Events</h3>
-                        <div class="val text-red-600">${totalCritical}</div>
-                    </div>
-                    <div class="card" style="background-color: #faf5ff; border-color: #e9d5ff;">
-                        <h3 style="color: #6b21a8;">Prohibited Parking</h3>
-                        <div class="val text-purple-700">${forbiddenData.length}</div>
-                    </div>
-                </div>
+        <body>
+
+            <!-- Page 1: Executive Summary -->
+            <div class="page">
+            <div style="text-align: center; padding-top: 60px;">
+                <h1 style="font-size: 48px;">รายงานสรุปพฤติกรรมการขับขี่</h1>
+                <div style="font-size: 24px; color: #64748B;">Fleet Safety & Telematics Analysis Report</div>
+                <div style="margin-top: 20px; font-size: 18px;">ประจำวันที่: ${todayStr}</div>
             </div>
 
-            <!-- PAGE 2: Speed -->
-            <div class="page-break">
-                <div class="header-blue text-2xl">1. การใช้ความเร็วเกินกำหนด (Over Speed Analysis)</div>
-                <div class="chart-container"><canvas id="speedChart"></canvas></div>
-                <table><thead><tr><th>No.</th><th>ทะเบียนรถ (License Plate)</th><th>จำนวนครั้ง</th><th>รวมเวลา (Duration)</th></tr></thead>
-                <tbody>${topSpeed.map((d, i) => `<tr><td>${i+1}</td><td>${d.plate}</td><td>${d.count}</td><td>${formatDuration(d.durationMin)}</td></tr>`).join('')}</tbody></table>
-            </div>
-
-            <!-- PAGE 3: Idling -->
-            <div class="page-break">
-                <div class="header-blue text-2xl" style="background-color: #f59e0b;">2. การจอดไม่ดับเครื่อง (Idling Analysis)</div>
-                <div class="chart-container"><canvas id="idlingChart"></canvas></div>
-                <table><thead><tr><th>No.</th><th>ทะเบียนรถ</th><th>จำนวนครั้ง</th><th>รวมเวลา</th></tr></thead>
-                <tbody>${topIdling.map((d, i) => `<tr><td>${i+1}</td><td>${d.plate}</td><td>${d.count}</td><td>${formatDuration(d.durationMin)}</td></tr>`).join('')}</tbody></table>
-            </div>
-
-            <!-- PAGE 4: Critical -->
-            <div class="page-break">
-                <div class="header-blue text-2xl" style="background-color: #dc2626;">3. เหตุการณ์วิกฤต (Critical Safety Events)</div>
-                <h3 class="text-xl mt-4 font-bold text-red-700">3.1 เบรกกะทันหัน</h3>
-                <table><thead><tr><th>ทะเบียนรถ</th><th>รายละเอียด</th></tr></thead><tbody>${brakeData.length ? brakeData.slice(0, 10).map(d => `<tr><td>${d.plate}</td><td>${d.detail}</td></tr>`).join('') : '<tr><td colspan="2">ไม่มีข้อมูล</td></tr>'}</tbody></table>
-                <h3 class="text-xl mt-8 font-bold text-red-700">3.2 ออกตัวกระชาก</h3>
-                <table><thead><tr><th>ทะเบียนรถ</th><th>รายละเอียด</th></tr></thead><tbody>${startData.length ? startData.slice(0, 10).map(d => `<tr><td>${d.plate}</td><td>${d.detail}</td></tr>`).join('') : '<tr><td colspan="2">ไม่มีข้อมูล</td></tr>'}</tbody></table>
-            </div>
-
-            <!-- PAGE 5: Forbidden -->
-            <div>
-                <div class="header-blue text-2xl" style="background-color: #9333ea;">4. รายงานพื้นที่ห้ามจอด (Prohibited Parking)</div>
-                <div class="chart-container"><canvas id="forbiddenChart"></canvas></div>
-                <table><thead><tr><th>No.</th><th>ทะเบียนรถ</th><th>สถานี</th><th>รวมเวลา</th></tr></thead>
-                <tbody>${topForbidden.map((d, i) => `<tr><td>${i+1}</td><td>${d.plate}</td><td>${d.station}</td><td>${formatDuration(d.durationMin)}</td></tr>`).join('')}</tbody></table>
-            </div>
-
-            <script>
-                const commonOptions = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } };
+            <div class="content">
+                <div class="header-banner" style="margin-top: 40px; text-align: center;">บทสรุปผู้บริหาร (Executive Summary)</div>
                 
-                new Chart(document.getElementById('speedChart'), {
-                    type: 'bar', data: { labels: ${JSON.stringify(topSpeed.map(d=>d.plate))}, datasets: [{ label: 'Cnt', data: ${JSON.stringify(topSpeed.map(d=>d.count))}, backgroundColor: '#1e40af' }] }, options: commonOptions
-                });
-                
-                new Chart(document.getElementById('idlingChart'), {
-                    type: 'bar', indexAxis: 'y', data: { labels: ${JSON.stringify(topIdling.map(d=>d.plate))}, datasets: [{ label: 'Min', data: ${JSON.stringify(topIdling.map(d=>d.durationMin))}, backgroundColor: '#f59e0b' }] }, options: commonOptions
-                });
+                <div class="grid-2x2">
+                <div class="card">
+                    <div class="card-title c-blue">Over Speed (ครั้ง)</div>
+                    <div class="card-value c-blue">${totalOverSpeed}</div>
+                    <div class="card-sub">เหตุการณ์ทั้งหมด</div>
+                </div>
+                <div class="card">
+                    <div class="card-title c-orange">Max Idling (สูงสุด)</div>
+                    <div class="card-value c-orange">${Math.round(maxIdleCar.time / 60)}m</div>
+                    <div class="card-sub">${maxIdleCar.license}</div>
+                </div>
+                <div class="card">
+                    <div class="card-title c-red">Critical Events</div>
+                    <div class="card-value c-red">${criticalEvents.length}</div>
+                    <div class="card-sub">เบรก/ออกตัว กระชาก</div>
+                </div>
+                <div class="card">
+                    <div class="card-title c-purple">พื้นที่ห้ามจอด</div>
+                    <div class="card-value c-purple">${rawForbidden.length}</div>
+                    <div class="card-sub">จำนวนครั้งทั้งหมด</div>
+                </div>
+                </div>
+            </div>
+            </div>
 
-                new Chart(document.getElementById('forbiddenChart'), {
-                    type: 'bar', data: { labels: ${JSON.stringify(topForbidden.map(d=>d.plate))}, datasets: [{ label: 'Min', data: ${JSON.stringify(topForbidden.map(d=>d.durationMin))}, backgroundColor: '#9333ea' }] }, options: commonOptions
-                });
-            </script>
+            <!-- Page 2: Over Speed -->
+            <div class="page">
+            <div class="header-banner">1. การใช้ความเร็วเกินกำหนด (Over Speed Analysis)</div>
+            <div class="content">
+                <h3>Top 5 Over Speed Frequency</h3>
+                <div class="chart-container">
+                ${topSpeed.map(item => `
+                    <div class="bar-row">
+                    <div class="bar-label">${item.license}</div>
+                    <div class="bar-track">
+                        <div class="bar-fill" style="width: ${(item.count / (topSpeed[0]?.count || 1)) * 100}%; background: #1E40AF;">${item.count}</div>
+                    </div>
+                    </div>
+                `).join('')}
+                </div>
+
+                <table>
+                <thead>
+                    <tr><th>No.</th><th>ทะเบียนรถ</th><th>จำนวนครั้ง</th><th>รวมเวลา</th></tr>
+                </thead>
+                <tbody>
+                    ${topSpeed.map((item, idx) => `
+                    <tr>
+                        <td>${idx + 1}</td>
+                        <td>${item.license}</td>
+                        <td>${item.count}</td>
+                        <td>${formatSeconds(item.time)}</td>
+                    </tr>
+                    `).join('')}
+                </tbody>
+                </table>
+            </div>
+            </div>
+
+            <!-- Page 3: Idling -->
+            <div class="page">
+            <div class="header-banner">2. การจอดไม่ดับเครื่อง (Idling Analysis)</div>
+            <div class="content">
+                <h3>Top 5 Idling Duration (Minutes)</h3>
+                <div class="chart-container">
+                ${topIdle.map(item => `
+                    <div class="bar-row">
+                    <div class="bar-label">${item.license}</div>
+                    <div class="bar-track">
+                        <div class="bar-fill" style="width: ${(item.time / (topIdle[0]?.time || 1)) * 100}%; background: #F59E0B;">${Math.round(item.time / 60)}m</div>
+                    </div>
+                    </div>
+                `).join('')}
+                </div>
+
+                <table>
+                <thead>
+                    <tr><th>No.</th><th>ทะเบียนรถ</th><th>จำนวนครั้ง</th><th>รวมเวลา</th></tr>
+                </thead>
+                <tbody>
+                    ${topIdle.map((item, idx) => `
+                    <tr>
+                        <td>${idx + 1}</td>
+                        <td>${item.license}</td>
+                        <td>${item.count}</td>
+                        <td>${formatSeconds(item.time)}</td>
+                    </tr>
+                    `).join('')}
+                </tbody>
+                </table>
+            </div>
+            </div>
+
+            <!-- Page 4: Critical Events -->
+            <div class="page">
+            <div class="header-banner">3. เหตุการณ์วิกฤต (Critical Safety Events)</div>
+            <div class="content">
+                <table>
+                <thead>
+                    <tr><th>No.</th><th>ทะเบียนรถ</th><th>รายละเอียด</th><th>ประเภท</th></tr>
+                </thead>
+                <tbody>
+                    ${criticalEvents.map((item, idx) => `
+                    <tr>
+                        <td>${idx + 1}</td>
+                        <td>${item.license}</td>
+                        <td>Speed: ${item.v_start} &#8594; ${item.v_end} km/h</td>
+                        <td class="risk-${item.level}">${item.type}</td>
+                    </tr>
+                    `).join('')}
+                </tbody>
+                </table>
+            </div>
+            </div>
+
+            <!-- Page 5: Prohibited Parking -->
+            <div class="page">
+            <div class="header-banner">4. รายงานพื้นที่ห้ามจอด (Prohibited Parking Area Report)</div>
+            <div class="content">
+                <h3>Top 5 Prohibited Area Duration</h3>
+                <div class="chart-container">
+                ${topForbiddenChart.map(item => `
+                    <div class="bar-row">
+                    <div class="bar-label">${item.license}</div>
+                    <div class="bar-track">
+                        <div class="bar-fill" style="width: ${(item.time / (topForbiddenChart[0]?.time || 1)) * 100}%; background: #9333EA;">${Math.round(item.time / 60)}m</div>
+                    </div>
+                    </div>
+                `).join('')}
+                </div>
+
+                <table>
+                <thead>
+                    <tr><th>No.</th><th>ทะเบียนรถ</th><th>ชื่อสถานี</th><th>รวมเวลา</th></tr>
+                </thead>
+                <tbody>
+                    ${forbiddenList.map((item, idx) => `
+                    <tr>
+                        <td>${idx + 1}</td>
+                        <td>${item.license}</td>
+                        <td>${item.station}</td>
+                        <td>${item.timeStr}</td>
+                    </tr>
+                    `).join('')}
+                </tbody>
+                </table>
+            </div>
+            </div>
+
         </body>
-        </html>`;
+        </html>
+        `;
 
-        await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
+        await page.setContent(html, { waitUntil: 'networkidle0' });
         const pdfPath = path.join(downloadPath, 'Fleet_Safety_Analysis_Report.pdf');
         await page.pdf({
             path: pdfPath,
             format: 'A4',
             printBackground: true,
-            margin: { top: '20px', bottom: '20px', left: '20px', right: '20px' }
+            margin: { top: '0px', bottom: '0px', left: '0px', right: '0px' } // No margin as per template style
         });
         console.log(`   ✅ PDF Generated: ${pdfPath}`);
 
@@ -592,15 +687,15 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         console.log('📧 Step 8: Zipping Excels & Sending Email...');
         
         const allFiles = fs.readdirSync(downloadPath);
-        // Zip ทั้ง HTML (.xls) เดิม และ CSV (.csv) ใหม่
-        const filesToZip = allFiles.filter(f => f.startsWith('DTC_Completed_') || f.startsWith('Converted_'));
+        // เลือกเฉพาะ Excel ที่โหลดเสร็จแล้ว (Converted_...csv)
+        const excelsToZip = allFiles.filter(f => f.startsWith('Converted_') && f.endsWith('.csv'));
 
-        if (filesToZip.length > 0 || fs.existsSync(pdfPath)) {
-            const zipName = `DTC_Reports_${todayStr}.zip`;
+        if (excelsToZip.length > 0 || fs.existsSync(pdfPath)) {
+            const zipName = `DTC_Excel_Reports_${todayStr}.zip`;
             const zipPath = path.join(downloadPath, zipName);
             
-            if(filesToZip.length > 0) {
-                await zipFiles(downloadPath, zipPath, filesToZip);
+            if(excelsToZip.length > 0) {
+                await zipFiles(downloadPath, zipPath, excelsToZip);
             }
 
             const attachments = [];
@@ -616,7 +711,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                 from: `"DTC Reporter" <${EMAIL_USER}>`,
                 to: EMAIL_TO,
                 subject: `รายงานสรุปพฤติกรรมการขับขี่ (Fleet Safety Report) - ${todayStr}`,
-                text: `เรียน ผู้เกี่ยวข้อง\n\nระบบส่งรายงานประจำวัน (06:00 - 18:00) ดังแนบ:\n1. ไฟล์รายงานดิบและ CSV (อยู่ใน Zip)\n2. ไฟล์ PDF สรุปภาพรวม\n\nขอบคุณครับ\nDTC Automation Bot`,
+                text: `เรียน ผู้เกี่ยวข้อง\n\nระบบส่งรายงานประจำวัน (06:00 - 18:00) ดังแนบ:\n1. ไฟล์ CSV รายละเอียด (อยู่ใน Zip)\n2. ไฟล์ PDF สรุปภาพรวม\n\nขอบคุณครับ\nDTC Automation Bot`,
                 attachments: attachments
             });
             console.log(`   ✅ Email Sent Successfully! (${attachments.length} attachments)`);
