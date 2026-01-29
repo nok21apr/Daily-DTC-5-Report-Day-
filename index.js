@@ -4,18 +4,18 @@ const path = require('path');
 const nodemailer = require('nodemailer');
 const { JSDOM } = require('jsdom');
 const archiver = require('archiver');
-const ExcelJS = require('exceljs');
+const { parse } = require('csv-parse/sync'); // ใช้สำหรับอ่าน CSV กลับมาทำ PDF
+// const ExcelJS = require('exceljs'); // ไม่ได้ใช้ในการ Convert แล้ว แต่เก็บไว้เผื่อ PDF Engine อื่น
 
 // --- Helper Functions ---
 
-// 1. ฟังก์ชันรอโหลดไฟล์ (คงเดิมตามไฟล์ล่าสุด)
+// 1. ฟังก์ชันรอโหลดไฟล์ (Modified: Report 1-4 No Convert, Report 5 -> CSV)
 async function waitForDownloadAndRename(downloadPath, newFileName, maxWaitMs = 300000) {
     console.log(`   Waiting for download: ${newFileName}...`);
     let downloadedFile = null;
     const checkInterval = 10000; 
     let waittime = 0;
 
-    // วนลูปรอไฟล์จนกว่าจะเจอ หรือหมดเวลา
     while (waittime < maxWaitMs) {
         const files = fs.readdirSync(downloadPath);
         downloadedFile = files.find(f => 
@@ -36,31 +36,30 @@ async function waitForDownloadAndRename(downloadPath, newFileName, maxWaitMs = 3
 
     if (!downloadedFile) throw new Error(`Download timeout for ${newFileName}`);
 
-    await new Promise(resolve => setTimeout(resolve, 10000)); // รอเขียนไฟล์ให้เสร็จสมบูรณ์
+    await new Promise(resolve => setTimeout(resolve, 5000));
 
     const oldPath = path.join(downloadPath, downloadedFile);
     const finalFileName = `DTC_Completed_${newFileName}`;
     const newPath = path.join(downloadPath, finalFileName);
     
-    // ตรวจสอบขนาดไฟล์ต้องไม่ว่างเปล่า
     const stats = fs.statSync(oldPath);
     if (stats.size === 0) throw new Error(`Downloaded file is empty!`);
 
     if (fs.existsSync(newPath)) fs.unlinkSync(newPath);
     fs.renameSync(oldPath, newPath);
     
-    // แปลงเป็น XLSX ทันที เพื่อให้อ่านข้อมูลได้แม่นยำ
-    const xlsxFileName = `Converted_${newFileName.replace('.xls', '.xlsx')}`;
-    const xlsxPath = path.join(downloadPath, xlsxFileName);
-    
-    // เลือกฟังก์ชันแปลงตามชื่อไฟล์
+    // Logic การแปลงไฟล์ใหม่
     if (newFileName.includes('Report5')) {
-        await convertReport5ToExcel(newPath, xlsxPath);
+        // แปลงเป็น CSV
+        const csvFileName = `Converted_${newFileName.replace('.xls', '.csv')}`;
+        const csvPath = path.join(downloadPath, csvFileName);
+        await convertHtmlToCsv(newPath, csvPath);
+        return csvPath;
     } else {
-        await convertHtmlToExcel(newPath, xlsxPath);
+        // ไม่แปลง (Report 1-4 ใช้ไฟล์เดิมที่เป็น HTML-XLS)
+        console.log(`   ℹ️  Skipping conversion for ${finalFileName} (Keep as original)`);
+        return newPath;
     }
-
-    return xlsxPath;
 }
 
 // 2. ฟังก์ชันรอตารางข้อมูล (คงเดิม)
@@ -73,116 +72,46 @@ async function waitForTableData(page, minRows = 2, timeout = 300000) {
             if (bodyText.includes('ไม่พบข้อมูล') || bodyText.includes('No data found')) return true; 
             return rows.length >= min; 
         }, { timeout: timeout }, minRows);
-        
-        const rowCount = await page.evaluate(() => document.querySelectorAll('table tr').length);
-        console.log(`   ✅ Table populated with ${rowCount} rows.`);
+        console.log('   ✅ Table data populated.');
     } catch (e) {
-        console.warn('   ⚠️ Wait for table data timed out (Data might be empty).');
+        console.warn('   ⚠️ Wait for table data timed out.');
     }
 }
 
-// 3. แปลง HTML -> Excel (ทั่วไป สำหรับ Report 1-4)
-async function convertHtmlToExcel(sourcePath, destPath) {
+// 3. แปลง HTML -> CSV (สำหรับ Report 5)
+async function convertHtmlToCsv(sourcePath, destPath) {
     try {
+        console.log(`   🔄 Converting HTML to CSV (UTF-8)...`);
         const content = fs.readFileSync(sourcePath, 'utf-8');
-        if (!content.trim().startsWith('<')) { fs.copyFileSync(sourcePath, destPath); return; }
-
         const dom = new JSDOM(content);
         const table = dom.window.document.querySelector('table');
-        if (!table) { fs.copyFileSync(sourcePath, destPath); return; }
 
-        const workbook = new ExcelJS.Workbook();
-        const worksheet = workbook.addWorksheet('Sheet1');
-        const rows = Array.from(table.querySelectorAll('tr'));
-
-        rows.forEach((row) => {
-            const cells = Array.from(row.querySelectorAll('td, th')).map(c => c.textContent.trim());
-            worksheet.addRow(cells);
-        });
-        
-        worksheet.columns.forEach(column => { column.width = 20; });
-        await workbook.xlsx.writeFile(destPath);
-        console.log(`   ✅ Converted: ${path.basename(destPath)}`);
-    } catch (e) { fs.copyFileSync(sourcePath, destPath); }
-}
-
-// 4. แปลง Report 5 แบบพิเศษ (FIXED: เก็บทุกบรรทัด + ตีเส้น + จัดกลาง)
-async function convertReport5ToExcel(sourcePath, destPath) {
-    try {
-        console.log(`   🎨 Converting Report 5 with Full Formatting...`);
-        const content = fs.readFileSync(sourcePath, 'utf-8');
-        
-        // ถ้าไม่ใช่ HTML ให้ Copy เลย
-        if (!content.trim().startsWith('<')) { 
-            fs.copyFileSync(sourcePath, destPath); 
-            return; 
+        if (!table) {
+             console.warn('No table found, copying original.');
+             fs.copyFileSync(sourcePath, destPath);
+             return;
         }
 
-        const dom = new JSDOM(content);
-        const table = dom.window.document.querySelector('table');
-        if (!table) { 
-            fs.copyFileSync(sourcePath, destPath); 
-            return; 
-        }
-
-        const workbook = new ExcelJS.Workbook();
-        const worksheet = workbook.addWorksheet('Forbidden Parking');
-        
-        // ดึงทุกแถวโดยไม่ข้าม (รวม 4 บรรทัดแรกที่เป็นหัวกระดาษ)
         const rows = Array.from(table.querySelectorAll('tr'));
+        let csvContent = '\uFEFF'; // Add BOM for Excel UTF-8 support
 
-        rows.forEach((row, rowIndex) => {
+        rows.forEach(row => {
             const cells = Array.from(row.querySelectorAll('td, th'));
-            const rowData = cells.map(cell => cell.textContent.replace(/<[^>]*>/g, '').trim());
-            
-            const excelRow = worksheet.addRow(rowData);
-
-            // จัดรูปแบบ Cell
-            excelRow.eachCell({ includeEmpty: true }, (cell, colNumber) => {
-                // Font เริ่มต้น (Angsana หรือใกล้เคียง)
-                cell.font = { name: 'Angsana New', size: 14 };
-                
-                // ตีเส้นทุกช่องเป็นค่าเริ่มต้น
-                cell.border = {
-                    top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' }
-                };
-
-                // จัดรูปแบบตามตำแหน่งแถว
-                if (rowIndex < 4) { 
-                    // หัวกระดาษ (4 บรรทัดแรก): ตัวหนา, ใหญ่, ชิดซ้าย, ไม่ต้องตีเส้น
-                    cell.font = { bold: true, size: 16, name: 'Angsana New' };
-                    cell.alignment = { vertical: 'middle', horizontal: 'left' };
-                    cell.border = {}; // ไม่ตีเส้นหัวกระดาษ
-                } 
-                // หัวตาราง (บรรทัดที่มี TH หรือบรรทัดที่ 5)
-                else if (rowIndex === 4 || cells[colNumber-1]?.tagName === 'TH' || rowData.some(d => d.includes('ลำดับ'))) {
-                    // หัวตาราง: สีเทา, ตัวหนา, กึ่งกลาง, มีเส้น
-                    cell.font = { bold: true, size: 14, name: 'Angsana New' };
-                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD3D3D3' } };
-                    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-                } 
-                else {
-                    // ข้อมูลเนื้อหา: กึ่งกลาง, มีเส้น
-                    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-                }
+            const rowData = cells.map(cell => {
+                let text = cell.textContent.replace(/\s+/g, ' ').trim(); // Clean text
+                // Escape double quotes
+                if (text.includes('"')) text = text.replace(/"/g, '""');
+                // Wrap in quotes if contains comma
+                if (text.includes(',') || text.includes('"') || text.includes('\n')) text = `"${text}"`;
+                return text;
             });
+            csvContent += rowData.join(',') + '\n';
         });
 
-        // Auto-fit Columns (ปรับความกว้าง)
-        worksheet.columns.forEach(column => {
-            let maxLength = 0;
-            column.eachCell({ includeEmpty: true }, function(cell) {
-                const len = cell.value ? cell.value.toString().length : 10;
-                if (len > maxLength) maxLength = len;
-            });
-            column.width = Math.min(Math.max(maxLength * 1.2, 10), 60);
-        });
-
-        await workbook.xlsx.writeFile(destPath);
-        console.log(`   ✅ Report 5 Converted & Formatted: ${path.basename(destPath)}`);
+        fs.writeFileSync(destPath, csvContent, 'utf8');
+        console.log(`   ✅ CSV Created: ${path.basename(destPath)}`);
     } catch (e) {
-        console.warn(`   ⚠️ Report 5 Conversion Failed: ${e.message}`);
-        fs.copyFileSync(sourcePath, destPath);
+        console.warn(`   ⚠️ CSV Conversion failed: ${e.message}`);
     }
 }
 
@@ -192,20 +121,8 @@ function getTodayFormatted() {
     return new Intl.DateTimeFormat('en-CA', options).format(date);
 }
 
-// Helper: ดึงค่า String จาก ExcelJS Cell
-function getStringValue(cell) {
-    if (cell === null || cell === undefined) return '';
-    if (typeof cell === 'object') {
-        if (cell.text) return cell.text; 
-        if (cell.result) return cell.result;
-        return String(cell);
-    }
-    return String(cell).trim();
-}
-
 function parseDurationToMinutes(durationStr) {
     if (!durationStr) return 0;
-    // หา pattern เวลา HH:MM:SS หรือ HH:MM
     const match = durationStr.match(/(\d+):(\d+)(?::(\d+))?/);
     if (!match) return 0;
     const h = parseInt(match[1], 10);
@@ -214,78 +131,81 @@ function parseDurationToMinutes(durationStr) {
     return (h * 60) + m + (s / 60);
 }
 
-// *** FIXED & SMART DATA EXTRACTION (NEW LOGIC) ***
-async function extractDataFromXLSX(filePath, reportType) {
+// *** NEW: Universal Data Extractor (รองรับทั้ง HTML และ CSV) ***
+async function extractDataUniversal(filePath, reportType) {
     try {
         if (!fs.existsSync(filePath)) return [];
-        const workbook = new ExcelJS.Workbook();
-        await workbook.xlsx.readFile(filePath);
-        const worksheet = workbook.getWorksheet(1);
-        const data = [];
+        const ext = path.extname(filePath).toLowerCase();
+        let rows = [];
 
-        worksheet.eachRow((row, rowNumber) => {
-            // ข้าม Header: Report 5 มี Header 4-5 บรรทัด, Report อื่นมี 1-2
-            // เพื่อความชัวร์ ให้เริ่มดูเมื่อเจอแถวที่มีทะเบียนรถ
-            const cells = (row.values || []).slice(1).map(getStringValue);
+        // 1. อ่านข้อมูลดิบตามนามสกุลไฟล์
+        if (ext === '.csv') {
+            const fileContent = fs.readFileSync(filePath, 'utf8');
+            // ใช้ csv-parse เพื่ออ่าน CSV
+            const records = parse(fileContent, {
+                columns: false, // อ่านเป็น array ของ array
+                skip_empty_lines: true,
+                relax_column_count: true
+            });
+            // records คือ array ของ rows
+            rows = records;
+        } else {
+            // อ่านแบบ HTML (สำหรับ Report 1-4 ที่ไม่ได้แปลง)
+            const content = fs.readFileSync(filePath, 'utf-8');
+            const dom = new JSDOM(content);
+            const tableRows = Array.from(dom.window.document.querySelectorAll('table tr'));
+            rows = tableRows.map(tr => 
+                Array.from(tr.querySelectorAll('td, th')).map(td => td.textContent.trim())
+            );
+        }
+
+        const data = [];
+        
+        // 2. Process ข้อมูล
+        rows.forEach((cells, rowIndex) => {
+            // ข้าม Header: CSV Report 5 มี Header 4-5 บรรทัด, HTML Report อื่นๆ มี 1-2
+            const startRow = (reportType === 'forbidden') ? 5 : 2;
+            if (rowIndex < startRow) return;
+
             if (cells.length < 3) return;
 
             // Regex Patterns
-            const plateRegex = /[0-9]{1,3}-[0-9]{1,4}|[0-9]?[ก-ฮ]{1,3}-[0-9]{1,4}/; // ทะเบียน
-            const timeRegex = /\d{1,2}:\d{2}(:\d{2})?/; // เวลา (HH:MM หรือ HH:MM:SS)
+            const plateRegex = /[0-9]{1,3}-[0-9]{1,4}|[0-9]?[ก-ฮ]{1,3}-[0-9]{1,4}/; 
+            const timeRegex = /\d{1,2}:\d{2}/; 
 
-            // 1. หาทะเบียนรถ (Anchor Point)
-            // หา cell ที่มีรูปแบบทะเบียน และความยาวไม่เกิน 25 (กันพลาดไปจับ header ยาวๆ)
-            const plateIndex = cells.findIndex(c => plateRegex.test(c) && c.length < 15 && !c.includes(':'));
-            
-            if (plateIndex === -1) return; // ถ้าไม่เจอทะเบียน ข้าม
-            
+            // หา Index ของทะเบียนรถ
+            const plateIndex = cells.findIndex(c => plateRegex.test(c) && c.length < 25 && !c.includes(':'));
+            if (plateIndex === -1) return;
             const plate = cells[plateIndex];
 
-            // 2. หาเวลา (Duration)
-            // กรองหา cell ที่เป็นเวลาทั้งหมดในแถว
+            // หา Duration
             const timeCells = cells.filter(c => timeRegex.test(c));
-            
-            // หาเวลาที่เป็น Duration 
             let duration = "00:00:00";
             if (timeCells.length > 0) {
-                 // ถ้ามีหลายเวลา (เช่น เวลาเข้า, เวลาออก, รวมเวลา) เลือกตัวสุดท้าย (มักเป็น Duration รวม)
-                 // สำหรับ Forbidden Parking, Duration คือตัวสุดท้ายเช่นกัน
-                 duration = timeCells[timeCells.length - 1];
+                 duration = timeCells[timeCells.length - 1]; // เอาตัวสุดท้าย
             }
 
             if (reportType === 'speed' || reportType === 'idling') {
                 data.push({ plate, duration, durationMin: parseDurationToMinutes(duration) });
             } 
             else if (reportType === 'critical') {
-                // Report 3, 4: ต้องการ "รายละเอียด" ไม่ใช่เวลา
-                // หาข้อความยาวๆ ที่ไม่ใช่ทะเบียน และไม่ใช่เวลา ที่อยู่หลังทะเบียน
                 let detail = cells.slice(plateIndex + 1).find(c => c.length > 3 && !timeRegex.test(c) && !plateRegex.test(c));
                 if (!detail) detail = "Critical Event";
                 data.push({ plate, detail });
             } 
             else if (reportType === 'forbidden') {
-                // Report 5: ต้องการ "ชื่อสถานี"
-                // หาข้อความที่ไม่ใช่ตัวเลข/เวลา ที่อยู่หลังทะเบียน
-                // ตัวอย่าง: [ลำดับ, ทะเบียน, เลขข้างรถ, ชื่อผู้ใช้, สถานี, เวลาเข้า, เวลาออก, ...]
                 let station = "";
-                // หา Text ที่เป็นชื่อสถานที่ (มักอยู่ col 4 หรือ 5)
-                // มองหา string ที่ไม่ใช่ date, time, plate
-                const candidates = cells.slice(plateIndex + 1);
-                const stationCandidate = candidates.find(c => 
-                    c.length > 2 && 
-                    !timeRegex.test(c) && 
-                    isNaN(c.replace(/[-/:\s]/g, '')) // ไม่ใช่ตัวเลขหรือวันที่
-                );
-                
-                if (stationCandidate) station = stationCandidate;
+                const possibleStations = cells.slice(plateIndex + 1).filter(c => c.length > 2 && !timeRegex.test(c) && isNaN(c.replace(/[-/:\s]/g, '')));
+                if (possibleStations.length > 0) station = possibleStations[0];
                 else station = "Unknown Station";
                 
                 data.push({ plate, station, duration, durationMin: parseDurationToMinutes(duration) });
             }
         });
-        
+
         console.log(`      -> Extracted ${data.length} records from ${path.basename(filePath)}`);
         return data;
+
     } catch (e) {
         console.warn(`   ⚠️ Extract Error ${path.basename(filePath)}: ${e.message}`);
         return [];
@@ -317,7 +237,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation (Fixed PDF & Report 5 Formatting)...');
+    console.log('🚀 Starting DTC Automation (HTML/CSV Mode)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -350,15 +270,13 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         const todayStr = getTodayFormatted();
         const startDateTime = `${todayStr} 06:00`;
         const endDateTime = `${todayStr} 18:00`;
-        console.log(`🕒 Global Time Settings: ${startDateTime} to ${endDateTime}`);
-
-        // --- Step 2 to 6: STRICTLY PRESERVED FROM YOUR UPLOAD ---
         
-        // REPORT 1: Over Speed
+        // --- REPORT 1: Over Speed ---
         console.log('📊 Processing Report 1: Over Speed...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/Report_03.php', { waitUntil: 'domcontentloaded' });
         await page.waitForSelector('#speed_max', { visible: true });
-        await new Promise(r => setTimeout(r, 10000));
+        await page.waitForFunction(() => document.getElementById('ddl_truck').options.length > 1, {timeout: 60000});
+
         await page.evaluate((start, end) => {
             document.getElementById('speed_max').value = '55';
             document.getElementById('date9').value = start;
@@ -374,16 +292,19 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             select.dispatchEvent(new Event('change', { bubbles: true }));
         }, startDateTime, endDateTime);
         await page.evaluate(() => { if(typeof sertch_data === 'function') sertch_data(); else document.querySelector("span[onclick='sertch_data();']").click(); });
-        await new Promise(r => setTimeout(r, 300000)); 
+        await waitForTableData(page, 2, 300000); 
+
         try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
         await page.evaluate(() => document.getElementById('btnexport').click());
+        // คืนค่าเป็น HTML file (.xls)
         const file1 = await waitForDownloadAndRename(downloadPath, 'Report1_OverSpeed.xls');
 
         // REPORT 2: Idling
         console.log('📊 Processing Report 2: Idling...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/Report_02.php', { waitUntil: 'domcontentloaded' });
         await page.waitForSelector('#date9', { visible: true });
-        await new Promise(r => setTimeout(r, 10000));
+        await page.waitForFunction(() => document.getElementById('ddl_truck').options.length > 1);
+
         await page.evaluate((start, end) => {
             document.getElementById('date9').value = start;
             document.getElementById('date10').value = end;
@@ -394,8 +315,8 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             if (select) { for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } select.dispatchEvent(new Event('change', { bubbles: true })); }
         }, startDateTime, endDateTime);
         await page.click('td:nth-of-type(6) > span');
-        await new Promise(r => setTimeout(r, 300000));
-        try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
+        await waitForTableData(page, 2, 180000);
+
         await page.evaluate(() => document.getElementById('btnexport').click());
         const file2 = await waitForDownloadAndRename(downloadPath, 'Report2_Idling.xls');
 
@@ -403,7 +324,8 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         console.log('📊 Processing Report 3: Sudden Brake...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/report_hd.php', { waitUntil: 'domcontentloaded' });
         await page.waitForSelector('#date9', { visible: true });
-        await new Promise(r => setTimeout(r, 10000));
+        await page.waitForFunction(() => document.getElementById('ddl_truck').options.length > 1);
+
         await page.evaluate((start, end) => {
             document.getElementById('date9').value = start;
             document.getElementById('date10').value = end;
@@ -413,8 +335,8 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             if (select) { for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } select.dispatchEvent(new Event('change', { bubbles: true })); }
         }, startDateTime, endDateTime);
         await page.click('td:nth-of-type(6) > span');
-        console.log('   ⏳ Waiting 3 mins...'); 
-        await new Promise(r => setTimeout(r, 180000)); 
+        await waitForTableData(page, 2, 180000);
+
         await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button'));
             const b = btns.find(b => b.innerText.includes('Excel') || b.title === 'Excel');
@@ -453,8 +375,8 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             await page.evaluate(() => {
                 if (typeof sertch_data === 'function') { sertch_data(); } else { document.querySelector('td:nth-of-type(6) > span').click(); }
             });
-            console.log('   ⏳ Waiting 3 mins for Report 4 data...');
-            for (let i = 1; i <= 3; i++) { await new Promise(r => setTimeout(r, 60000)); console.log(`       ... Passed ${i} minute(s)`); }
+            await waitForTableData(page, 2, 180000);
+
             console.log('   Clicking Export Report 4...');
             await page.evaluate(() => {
                 const xpathResult = document.evaluate('//*[@id="table"]/div[1]/button[3]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
@@ -483,11 +405,9 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             document.getElementById('date9').dispatchEvent(new Event('change'));
             document.getElementById('date10').dispatchEvent(new Event('change'));
             
-            // 1. รถทั้งหมด
             var select = document.getElementById('ddl_truck'); 
             if (select) { for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } select.dispatchEvent(new Event('change', { bubbles: true })); }
             
-            // 2. พื้นที่ห้ามเข้า (รองรับคำผิด 'พิ้น')
             var allSelects = document.getElementsByTagName('select');
             for(var s of allSelects) { 
                 for(var i=0; i<s.options.length; i++) { 
@@ -507,30 +427,32 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             for(var s of allSelects) { for(var i=0; i<s.options.length; i++) { if(s.options[i].text.includes('สถานีทั้งหมด')) { s.value = s.options[i].value; s.dispatchEvent(new Event('change', { bubbles: true })); break; } } }
         });
         await page.click('td:nth-of-type(7) > span');
-        await new Promise(r => setTimeout(r, 300000));
+        await waitForTableData(page, 2, 180000);
+        
         try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
         await page.evaluate(() => document.getElementById('btnexport').click());
+        // คืนค่าเป็น CSV file path
         const file5 = await waitForDownloadAndRename(downloadPath, 'Report5_ForbiddenParking.xls');
 
         // =================================================================
-        // STEP 7: Generate PDF Summary (UPDATED LOGIC)
+        // STEP 7: Generate PDF Summary (Uses Universal Extractor)
         // =================================================================
         console.log('📑 Step 7: Generating PDF Summary...');
 
         const fileMap = {
-            'speed': path.join(downloadPath, 'Converted_Report1_OverSpeed.xlsx'),
-            'idling': path.join(downloadPath, 'Converted_Report2_Idling.xlsx'),
-            'brake': path.join(downloadPath, 'Converted_Report3_SuddenBrake.xlsx'),
-            'start': path.join(downloadPath, 'Converted_Report4_HarshStart.xlsx'),
-            'forbidden': path.join(downloadPath, 'Converted_Report5_ForbiddenParking.xlsx')
+            'speed': path.join(downloadPath, 'DTC_Completed_Report1_OverSpeed.xls'),
+            'idling': path.join(downloadPath, 'DTC_Completed_Report2_Idling.xls'),
+            'brake': path.join(downloadPath, 'DTC_Completed_Report3_SuddenBrake.xls'),
+            'start': path.join(downloadPath, 'DTC_Completed_Report4_HarshStart.xls'),
+            'forbidden': path.join(downloadPath, 'Converted_Report5_ForbiddenParking.csv') // Report 5 is CSV
         };
 
-        const speedData = await extractDataFromXLSX(fileMap.speed, 'speed');
-        const idlingData = await extractDataFromXLSX(fileMap.idling, 'idling');
-        const brakeData = await extractDataFromXLSX(fileMap.brake, 'critical');
+        const speedData = await extractDataUniversal(fileMap.speed, 'speed');
+        const idlingData = await extractDataUniversal(fileMap.idling, 'idling');
+        const brakeData = await extractDataUniversal(fileMap.brake, 'critical');
         let startData = [];
-        try { startData = await extractDataFromXLSX(fileMap.start, 'critical'); } catch(e){}
-        const forbiddenData = await extractDataFromXLSX(fileMap.forbidden, 'forbidden');
+        try { startData = await extractDataUniversal(fileMap.start, 'critical'); } catch(e){}
+        const forbiddenData = await extractDataUniversal(fileMap.forbidden, 'forbidden');
 
         // Aggregation Logic (Top 5)
         const processStats = (data, key) => {
@@ -682,14 +604,15 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         console.log('📧 Step 8: Zipping Excels & Sending Email...');
         
         const allFiles = fs.readdirSync(downloadPath);
-        const excelsToZip = allFiles.filter(f => f.startsWith('Converted_'));
+        // Zip ทั้ง HTML (.xls) เดิม และ CSV (.csv) ใหม่
+        const filesToZip = allFiles.filter(f => f.startsWith('DTC_Completed_') || f.startsWith('Converted_'));
 
-        if (excelsToZip.length > 0 || fs.existsSync(pdfPath)) {
-            const zipName = `DTC_Excel_Reports_${todayStr}.zip`;
+        if (filesToZip.length > 0 || fs.existsSync(pdfPath)) {
+            const zipName = `DTC_Reports_${todayStr}.zip`;
             const zipPath = path.join(downloadPath, zipName);
             
-            if(excelsToZip.length > 0) {
-                await zipFiles(downloadPath, zipPath, excelsToZip);
+            if(filesToZip.length > 0) {
+                await zipFiles(downloadPath, zipPath, filesToZip);
             }
 
             const attachments = [];
@@ -705,7 +628,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                 from: `"DTC Reporter" <${EMAIL_USER}>`,
                 to: EMAIL_TO,
                 subject: `รายงานสรุปพฤติกรรมการขับขี่ (Fleet Safety Report) - ${todayStr}`,
-                text: `เรียน ผู้เกี่ยวข้อง\n\nระบบส่งรายงานประจำวัน (06:00 - 18:00) ดังแนบ:\n1. ไฟล์ Excel รายละเอียด (อยู่ใน Zip)\n2. ไฟล์ PDF สรุปภาพรวม\n\nขอบคุณครับ\nDTC Automation Bot`,
+                text: `เรียน ผู้เกี่ยวข้อง\n\nระบบส่งรายงานประจำวัน (06:00 - 18:00) ดังแนบ:\n1. ไฟล์รายงานดิบและ CSV (อยู่ใน Zip)\n2. ไฟล์ PDF สรุปภาพรวม\n\nขอบคุณครับ\nDTC Automation Bot`,
                 attachments: attachments
             });
             console.log(`   ✅ Email Sent Successfully! (${attachments.length} attachments)`);
