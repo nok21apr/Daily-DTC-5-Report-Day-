@@ -5,7 +5,7 @@ const nodemailer = require('nodemailer');
 const { JSDOM } = require('jsdom');
 const archiver = require('archiver');
 const { parse } = require('csv-parse/sync');
-
+const ExcelJS = require('exceljs');
 // --- Helper Functions ---
 
 // 1. ฟังก์ชันรอโหลดไฟล์ และแปลงเป็น CSV (บังคับ CSV ทุกไฟล์)
