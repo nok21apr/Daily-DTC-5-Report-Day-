@@ -4,7 +4,7 @@ const path = require('path');
 const nodemailer = require('nodemailer');
 const { JSDOM } = require('jsdom');
 const archiver = require('archiver');
-const { parse } = require('csv-parse/sync'); // ใช้สำหรับอ่าน CSV
+const { parse } = require('csv-parse/sync');
 
 // --- Helper Functions ---
 
@@ -42,13 +42,14 @@ async function waitForDownloadAndRename(downloadPath, newFileName, maxWaitMs = 3
     const finalFileName = `DTC_Completed_${newFileName}`;
     const newPath = path.join(downloadPath, finalFileName);
     
+    // ตรวจสอบขนาดไฟล์
     const stats = fs.statSync(oldPath);
     if (stats.size === 0) throw new Error(`Downloaded file is empty!`);
 
     if (fs.existsSync(newPath)) fs.unlinkSync(newPath);
     fs.renameSync(oldPath, newPath);
     
-    // แปลงเป็น CSV (UTF-8) เสมอ
+    // แปลงเป็น CSV (UTF-8) เสมอ เพื่อให้ Step 7 อ่านได้ถูกต้อง
     const csvFileName = `Converted_${newFileName.replace('.xls', '.csv')}`;
     const csvPath = path.join(downloadPath, csvFileName);
     await convertHtmlToCsv(newPath, csvPath);
@@ -77,7 +78,9 @@ async function convertHtmlToCsv(sourcePath, destPath) {
             const cells = Array.from(row.querySelectorAll('td, th'));
             const rowData = cells.map(cell => {
                 let text = cell.textContent.replace(/\s+/g, ' ').trim();
+                // Escape double quotes
                 if (text.includes('"')) text = text.replace(/"/g, '""');
+                // ครอบด้วย quotes ถ้ามี comma หรือ quote
                 if (text.includes(',') || text.includes('"')) text = `"${text}"`;
                 return text;
             });
@@ -107,7 +110,7 @@ async function waitForTableData(page, minRows = 2, timeout = 300000) {
     }
 }
 
-// --- NEW HELPERS FOR DATA PROCESSING ---
+// --- DATA PROCESSING HELPERS (จาก Code ของคุณ) ---
 
 // แปลงเวลาไทย/HH:MM:SS เป็นวินาที
 function parseDurationToSeconds(timeStr) {
@@ -121,14 +124,14 @@ function parseDurationToSeconds(timeStr) {
         const s = parseInt(thaiMatch[3] || 0);
         return (h * 3600) + (m * 60) + s;
     }
-   
+
     // กรณี 2: "00:11:19" (HH:MM:SS)
     if (timeStr.includes(':')) {
         const parts = timeStr.split(':').map(Number);
         if (parts.length === 3) return (parts[0] * 3600) + (parts[1] * 60) + parts[2];
         if (parts.length === 2) return (parts[0] * 60) + parts[1]; // MM:SS
     }
-   
+
     return 0;
 }
 
@@ -147,7 +150,7 @@ function processCSV(filePath, skipLines, colMap) {
             console.warn(`File not found: ${filePath}`);
             return [];
         }
-        
+
         const fileContent = fs.readFileSync(filePath, 'utf8');
         // ข้ามบรรทัด Header ด้านบน
         const lines = fileContent.split('\n').slice(skipLines).join('\n');
@@ -158,16 +161,16 @@ function processCSV(filePath, skipLines, colMap) {
             relax_column_count: true,
             bom: true
         });
-   
+
         return records.map(row => {
             const data = {};
             for (const [key, index] of Object.entries(colMap)) {
-                // index ในที่นี้ User ส่งมาเป็น 1-based (Excel Style) ต้องลบ 1
-                const idx = parseInt(index); // index ที่ส่งมาเป็น 0-based จาก CSV array
+                // index ที่ส่งมาเป็น 1-based (Excel Style) ต้องลบ 1 เพื่อใช้กับ Array 0-based
+                const idx = parseInt(index) - 1; // **แก้ไขให้ตรงกับ Array Index**
                 data[key] = row[idx] ? row[idx].trim() : '';
             }
             return data;
-        }).filter(r => r.license && r.license !== 'รวม'); 
+        }).filter(r => r.license); // กรองแถวว่างที่ไม่มีทะเบียนรถ
     } catch (err) {
         console.error(`Error reading ${filePath}:`, err.message);
         return [];
@@ -243,11 +246,15 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         // --- Step 2 to 6: DOWNLOAD REPORTS ---
         
         // REPORT 1: Over Speed
+        console.log('📊 Processing Report 1: Over Speed...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/Report_03.php', { waitUntil: 'domcontentloaded' });
-        
         await page.waitForSelector('#speed_max', { visible: true });
-        await page.waitForSelector('#ddl_truck', { visible: true });
-        await new Promise(r => setTimeout(r, 10000));
+        
+        // รอ Dropdown รถ
+        await page.waitForFunction(() => {
+            const s = document.getElementById('ddl_truck');
+            return s && s.options.length > 1; 
+        }, { timeout: 60000 });
 
         await page.evaluate((start, end) => {
             document.getElementById('speed_max').value = '55';
@@ -259,159 +266,106 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                 document.getElementById('ddlMinute').value = '1';
                 document.getElementById('ddlMinute').dispatchEvent(new Event('change'));
             }
-            
-            // เลือกทะเบียน "ทั้งหมด"
-            var selectElement = document.getElementById('ddl_truck'); 
-            var options = selectElement.options; 
-            for (var i = 0; i < options.length; i++) { 
-                if (options[i].text.includes('ทั้งหมด')) { selectElement.value = options[i].value; break; } 
-            } 
-            selectElement.dispatchEvent(new Event('change', { bubbles: true }));
+            var select = document.getElementById('ddl_truck'); 
+            for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } 
+            select.dispatchEvent(new Event('change', { bubbles: true }));
         }, startDateTime, endDateTime);
-
-        console.log('   Searching Report 1...');
-        await page.evaluate(() => {
-            if(typeof sertch_data === 'function') sertch_data();
-            else document.querySelector("span[onclick='sertch_data();']").click();
-        });
-
-        console.log('   ⏳ Waiting 5 mins...');
-        await new Promise(resolve => setTimeout(resolve, 300000));
-        
+        await page.evaluate(() => { if(typeof sertch_data === 'function') sertch_data(); else document.querySelector("span[onclick='sertch_data();']").click(); });
+        await waitForTableData(page, 2, 300000); 
         try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
-        console.log('   Exporting Report 1...');
         await page.evaluate(() => document.getElementById('btnexport').click());
-
         // Convert to CSV
         const file1 = await waitForDownloadAndRename(downloadPath, 'Report1_OverSpeed.xls');
 
         // REPORT 2: Idling
         console.log('📊 Processing Report 2: Idling...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/Report_02.php', { waitUntil: 'domcontentloaded' });
-        
         await page.waitForSelector('#date9', { visible: true });
-        await page.waitForSelector('#ddl_truck', { visible: true });
-        await new Promise(r => setTimeout(r, 10000));
+        await page.waitForFunction(() => document.getElementById('ddl_truck').options.length > 1);
 
         await page.evaluate((start, end) => {
             document.getElementById('date9').value = start;
             document.getElementById('date10').value = end;
             document.getElementById('date9').dispatchEvent(new Event('change'));
             document.getElementById('date10').dispatchEvent(new Event('change'));
-            
             if(document.getElementById('ddlMinute')) document.getElementById('ddlMinute').value = '10';
-
-            // เลือกทะเบียน "ทั้งหมด"
-            var selectElement = document.getElementById('ddl_truck'); 
-            if (selectElement) {
-                var options = selectElement.options; 
-                for (var i = 0; i < options.length; i++) { 
-                    if (options[i].text.includes('ทั้งหมด')) { selectElement.value = options[i].value; break; } 
-                } 
-                selectElement.dispatchEvent(new Event('change', { bubbles: true }));
-            }
+            var select = document.getElementById('ddl_truck'); 
+            if (select) { for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } select.dispatchEvent(new Event('change', { bubbles: true })); }
         }, startDateTime, endDateTime);
-
-        console.log('   Searching Report 2...');
         await page.click('td:nth-of-type(6) > span');
-
-        console.log('   ⏳ Waiting 5 mins...');
-        await new Promise(resolve => setTimeout(resolve, 300000));
-
+        await waitForTableData(page, 2, 180000); // Wait for Data
         try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
-        console.log('   Exporting Report 2...');
         await page.evaluate(() => document.getElementById('btnexport').click());
-
         // Convert to CSV
         const file2 = await waitForDownloadAndRename(downloadPath, 'Report2_Idling.xls');
 
         // REPORT 3: Sudden Brake
         console.log('📊 Processing Report 3: Sudden Brake...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/report_hd.php', { waitUntil: 'domcontentloaded' });
-        
         await page.waitForSelector('#date9', { visible: true });
-        await page.waitForSelector('#ddl_truck', { visible: true }); // รอ Dropdown
-        await new Promise(r => setTimeout(r, 10000));
+        await page.waitForFunction(() => document.getElementById('ddl_truck').options.length > 1);
 
         await page.evaluate((start, end) => {
             document.getElementById('date9').value = start;
             document.getElementById('date10').value = end;
             document.getElementById('date9').dispatchEvent(new Event('change'));
             document.getElementById('date10').dispatchEvent(new Event('change'));
-
-            // เลือกทะเบียน "ทั้งหมด" (Updated)
-            var selectElement = document.getElementById('ddl_truck'); 
-            if (selectElement) {
-                var options = selectElement.options; 
-                for (var i = 0; i < options.length; i++) { 
-                    if (options[i].text.includes('ทั้งหมด')) { selectElement.value = options[i].value; break; } 
-                } 
-                selectElement.dispatchEvent(new Event('change', { bubbles: true }));
-            }
+            var select = document.getElementById('ddl_truck'); 
+            if (select) { for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } select.dispatchEvent(new Event('change', { bubbles: true })); }
         }, startDateTime, endDateTime);
-
-        console.log('   Searching Report 3...');
         await page.click('td:nth-of-type(6) > span');
-
-        console.log('   ⏳ Waiting 2 mins...');
-        await new Promise(resolve => setTimeout(resolve, 120000));
-
-        console.log('   Exporting Report 3...');
+        await waitForTableData(page, 2, 180000); // Wait for Data
         await page.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const excelBtn = buttons.find(b => b.innerText.includes('Excel') || b.getAttribute('title') === 'Excel' || b.getAttribute('aria-label') === 'Excel');
-            if (excelBtn) excelBtn.click();
-            else {
-                const fallback = document.querySelector('#table button:nth-of-type(3)');
-                if (fallback) fallback.click();
-            }
+            const btns = Array.from(document.querySelectorAll('button'));
+            const b = btns.find(b => b.innerText.includes('Excel') || b.title === 'Excel');
+            if (b) b.click(); else document.querySelector('#table button:nth-of-type(3)')?.click();
         });
-
         // Convert to CSV
         const file3 = await waitForDownloadAndRename(downloadPath, 'Report3_SuddenBrake.xls');
 
         // REPORT 4: Harsh Start
         console.log('📊 Processing Report 4: Harsh Start...');
-        await page.goto('https://gps.dtc.co.th/ultimate/Report/report_ha.php', { waitUntil: 'domcontentloaded' });
-        
-        await page.waitForSelector('#date9', { visible: true });
-        await page.waitForSelector('#ddl_truck', { visible: true }); // รอ Dropdown
-        await new Promise(r => setTimeout(r, 10000));
-
-        await page.evaluate((start, end) => {
-            document.getElementById('date9').value = start;
-            document.getElementById('date10').value = end;
-            document.getElementById('date9').dispatchEvent(new Event('change'));
-            document.getElementById('date10').dispatchEvent(new Event('change'));
-
-            // เลือกทะเบียน "ทั้งหมด" (Updated)
-            var selectElement = document.getElementById('ddl_truck'); 
-            if (selectElement) {
-                var options = selectElement.options; 
-                for (var i = 0; i < options.length; i++) { 
-                    if (options[i].text.includes('ทั้งหมด')) { selectElement.value = options[i].value; break; } 
-                } 
-                selectElement.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-        }, startDateTime, endDateTime);
-
-        console.log('   Searching Report 4...');
-        await page.click('td:nth-of-type(6) > span');
-
-        console.log('   ⏳ Waiting 2 mins...');
-        await new Promise(resolve => setTimeout(resolve, 120000));
-
-        console.log('   Exporting Report 4...');
-        await page.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const excelBtn = buttons.find(b => b.innerText.includes('Excel') || b.getAttribute('title') === 'Excel' || b.getAttribute('aria-label') === 'Excel');
-            if (excelBtn) excelBtn.click();
-            else {
-                const fallback = document.querySelector('#table button:nth-of-type(3)');
-                if (fallback) fallback.click();
-            }
-        });
-
+        try {
+            await page.goto('https://gps.dtc.co.th/ultimate/Report/report_ha.php', { waitUntil: 'domcontentloaded' });
+            await page.waitForSelector('#date9', { visible: true, timeout: 60000 });
+            await page.waitForFunction(() => {
+                const select = document.getElementById('ddl_truck');
+                return select && select.options.length > 1;
+            }, { timeout: 60000 });
+            console.log('   Setting Report 4 Conditions (Programmatic)...');
+            await page.evaluate((start, end) => {
+                document.getElementById('date9').value = start;
+                document.getElementById('date10').value = end;
+                document.getElementById('date9').dispatchEvent(new Event('change'));
+                document.getElementById('date10').dispatchEvent(new Event('change'));
+                const select = document.getElementById('ddl_truck');
+                if (select) {
+                    let found = false;
+                    for (let i = 0; i < select.options.length; i++) {
+                        if (select.options[i].text.includes('ทั้งหมด') || select.options[i].text.toLowerCase().includes('all')) {
+                            select.selectedIndex = i; found = true; break;
+                        }
+                    }
+                    if (!found && select.options.length > 0) select.selectedIndex = 0;
+                    select.dispatchEvent(new Event('change', { bubbles: true }));
+                    if (typeof $ !== 'undefined' && $(select).data('select2')) { $(select).trigger('change'); }
+                }
+            }, startDateTime, endDateTime);
+            await page.evaluate(() => {
+                if (typeof sertch_data === 'function') { sertch_data(); } else { document.querySelector('td:nth-of-type(6) > span').click(); }
+            });
+            await waitForTableData(page, 2, 180000); // Wait for Data
+            
+            await page.evaluate(() => {
+                const xpathResult = document.evaluate('//*[@id="table"]/div[1]/button[3]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                const btn = xpathResult.singleNodeValue;
+                if (btn) btn.click();
+                else {
+                    const allBtns = Array.from(document.querySelectorAll('button'));
+                    const excelBtn = allBtns.find(b => b.innerText.includes('Excel') || b.title === 'Excel');
+                    if (excelBtn) excelBtn.click(); else throw new Error("Cannot find Export button for Report 4");
+                }
+            });
             // Convert to CSV
             const file4 = await waitForDownloadAndRename(downloadPath, 'Report4_HarshStart.xls');
         } catch (error) {
@@ -421,66 +375,42 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         // REPORT 5: Forbidden
         console.log('📊 Processing Report 5: Forbidden Parking...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/Report_Instation.php', { waitUntil: 'domcontentloaded' });
-        
         await page.waitForSelector('#date9', { visible: true });
-        await page.waitForSelector('#ddl_truck', { visible: true });
+        await page.waitForFunction(() => document.getElementById('ddl_truck').options.length > 1);
         await new Promise(r => setTimeout(r, 10000));
-
+        
         await page.evaluate((start, end) => {
-            // 1. วันที่
             document.getElementById('date9').value = start;
             document.getElementById('date10').value = end;
             document.getElementById('date9').dispatchEvent(new Event('change'));
             document.getElementById('date10').dispatchEvent(new Event('change'));
-
-            // 2. เลือกทะเบียน "ทั้งหมด" (Updated)
-            var truckSelect = document.getElementById('ddl_truck'); 
-            if (truckSelect) {
-                for (var i = 0; i < truckSelect.options.length; i++) { 
-                    if (truckSelect.options[i].text.includes('ทั้งหมด')) { truckSelect.value = truckSelect.options[i].value; break; } 
-                } 
-                truckSelect.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-
-            // 3. เลือกประเภทสถานี "พื้นที่ห้ามเข้า" (Updated)
-            // ค้นหา Select Element ทุกตัว เพื่อหาตัวที่มี Option นี้
+            
+            // 1. รถทั้งหมด
+            var select = document.getElementById('ddl_truck'); 
+            if (select) { for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } select.dispatchEvent(new Event('change', { bubbles: true })); }
+            
+            // 2. พื้นที่ห้ามเข้า (รองรับคำผิด 'พิ้น')
             var allSelects = document.getElementsByTagName('select');
-            for(var s of allSelects) {
-                for(var i=0; i<s.options.length; i++) {
-                    if(s.options[i].text.includes('พิ้น')) {
-                        s.value = s.options[i].value;
-                        s.dispatchEvent(new Event('change', { bubbles: true }));
-                        break;
-                    }
-                }
+            for(var s of allSelects) { 
+                for(var i=0; i<s.options.length; i++) { 
+                    const txt = s.options[i].text;
+                    if(txt.includes('พิ้น')) { 
+                        s.value = s.options[i].value; 
+                        s.dispatchEvent(new Event('change', { bubbles: true })); 
+                        break; 
+                    } 
+                } 
             }
         }, startDateTime, endDateTime);
-
-        // รอสักครู่เพื่อให้ Dropdown สถานีโหลดใหม่ตามประเภท
+        
         await new Promise(r => setTimeout(r, 10000));
-
         await page.evaluate(() => {
-            // 4. เลือกสถานี "สถานีทั้งหมด" (Updated)
             var allSelects = document.getElementsByTagName('select');
-            for(var s of allSelects) {
-                for(var i=0; i<s.options.length; i++) {
-                    if(s.options[i].text.includes('สถานีทั้งหมด')) {
-                        s.value = s.options[i].value;
-                        s.dispatchEvent(new Event('change', { bubbles: true }));
-                        break;
-                    }
-                }
-            }
+            for(var s of allSelects) { for(var i=0; i<s.options.length; i++) { if(s.options[i].text.includes('สถานีทั้งหมด')) { s.value = s.options[i].value; s.dispatchEvent(new Event('change', { bubbles: true })); break; } } }
         });
-
-        console.log('   Searching Report 5...');
         await page.click('td:nth-of-type(7) > span');
-
-        console.log('   ⏳ Waiting 5 mins...');
-        await new Promise(resolve => setTimeout(resolve, 300000));
-
+        await waitForTableData(page, 2, 180000); // Wait for Data
         try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
-        console.log('   Exporting Report 5...');
         await page.evaluate(() => document.getElementById('btnexport').click());
         // Convert to CSV
         const file5 = await waitForDownloadAndRename(downloadPath, 'Report5_ForbiddenParking.xls');
@@ -500,23 +430,12 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         };
 
         // 1. Process Report 1: Over Speed
-        // (Assuming Report 1 header occupies 5 lines, Col 2=License (index 1), Col 11=Duration (index 10 or find "รวมเวลา"))
-        // Note: index in processCSV is 1-based (Excel Style) as per your snippet logic but 'csv-parse' returns 0-based array.
-        // Your snippet: `colMap: { license: 1 }` -> `row[index]`.
-        // If Report 1 HTML table structure:
-        // Col 1: No., Col 2: License, ..., Last Col: Duration
-        
-        // Adjust mappings based on typical HTML-to-CSV output:
-        // Report 1: 5 lines header.
-        const rawSpeed = processCSV(FILES_CSV.OVERSPEED, 5, { license: 1, duration: 10 }); // Adjust duration index if needed
+        // Note: index in processCSV is 1-based (Excel Style) as per your snippet logic.
+        const rawSpeed = processCSV(FILES_CSV.OVERSPEED, 5, { license: 1, duration: 4 }); 
         const speedStats = {};
         rawSpeed.forEach(r => {
             if (!speedStats[r.license]) speedStats[r.license] = { count: 0, time: 0, license: r.license };
             speedStats[r.license].count++;
-            // Try to parse duration from multiple potential columns if strict mapping fails, 
-            // but here we stick to your structure. If 10 doesn't work, we might need a smarter CSV finder.
-            // For now, assuming index 4 (from your snippet) or 10.
-            // Your snippet used index 4 for duration. I will use 4.
             speedStats[r.license].time += parseDurationToSeconds(r.duration);
         });
         const topSpeed = Object.values(speedStats).sort((a, b) => b.count - a.count).slice(0, 5);
@@ -575,31 +494,26 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             .page { width: 210mm; height: 296mm; position: relative; page-break-after: always; overflow: hidden; }
             .content { padding: 40px; }
             
-            /* Headers */
             .header-banner { background: #1E40AF; color: white; padding: 15px 40px; font-size: 24px; font-weight: bold; margin-bottom: 30px; }
             h1 { font-size: 32px; color: #1E40AF; margin-bottom: 10px; }
             
-            /* Grid Cards */
             .grid-2x2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 50px; }
             .card { background: #F8FAFC; border-radius: 12px; padding: 30px; text-align: center; border: 1px solid #E2E8F0; }
             .card-title { font-size: 18px; font-weight: bold; margin-bottom: 10px; }
             .card-value { font-size: 48px; font-weight: bold; margin: 10px 0; }
             .card-sub { font-size: 14px; color: #64748B; }
             
-            /* Colors */
             .c-blue { color: #1E40AF; }
             .c-orange { color: #F59E0B; }
             .c-red { color: #DC2626; }
             .c-purple { color: #9333EA; }
             
-            /* Charts */
             .chart-container { margin: 40px 0; }
             .bar-row { display: flex; align-items: center; margin-bottom: 15px; }
             .bar-label { width: 180px; text-align: right; padding-right: 15px; font-weight: 600; font-size: 14px; }
             .bar-track { flex-grow: 1; background: #F1F5F9; height: 30px; border-radius: 4px; overflow: hidden; }
             .bar-fill { height: 100%; display: flex; align-items: center; justify-content: flex-end; padding-right: 10px; color: white; font-size: 12px; font-weight: bold; }
             
-            /* Tables */
             table { width: 100%; border-collapse: collapse; margin-top: 20px; }
             th { background: #1E40AF; color: white; padding: 12px; text-align: left; }
             td { padding: 10px; border-bottom: 1px solid #E2E8F0; }
