@@ -268,120 +268,191 @@ function getCriticalEvents(filePath, skipLines, colIdx) {
         const endDateTime = `${todayStr} 18:00`;
 
         // --- STEP 2-6: Download Reports ---
-        // (ส่วนนี้ใช้ Code เดิมของคุณที่ทำงานได้ดีแล้ว ผมย่อให้กระชับ)
-        
-        // Report 1: Over Speed
-        console.log('📊 R1: Over Speed...');
+        // REPORT 1: Over Speed
+        console.log('📊 Processing Report 1: Over Speed...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/Report_03.php', { waitUntil: 'domcontentloaded' });
-        await page.waitForSelector('#speed_max');
-        await new Promise(r => setTimeout(r, 3000));
-        await page.evaluate((s, e) => {
+        await page.waitForSelector('#speed_max', { visible: true });
+        
+        // Hard Wait 10s before fill
+        await new Promise(r => setTimeout(r, 10000));
+
+        await page.evaluate((start, end) => {
             document.getElementById('speed_max').value = '55';
-            document.getElementById('date9').value = s;
-            document.getElementById('date10').value = e;
-            if(document.getElementById('ddlMinute')) document.getElementById('ddlMinute').value = '1';
-            var sel = document.getElementById('ddl_truck');
-            for(var o of sel.options) if(o.text.includes('ทั้งหมด')) sel.value = o.value;
-            sel.dispatchEvent(new Event('change'));
+            document.getElementById('date9').value = start;
+            document.getElementById('date10').value = end;
+            document.getElementById('date9').dispatchEvent(new Event('change'));
+            document.getElementById('date10').dispatchEvent(new Event('change'));
+            if(document.getElementById('ddlMinute')) {
+                document.getElementById('ddlMinute').value = '1';
+                document.getElementById('ddlMinute').dispatchEvent(new Event('change'));
+            }
+            var select = document.getElementById('ddl_truck'); 
+            for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } 
+            select.dispatchEvent(new Event('change', { bubbles: true }));
         }, startDateTime, endDateTime);
-        await page.evaluate(() => typeof sertch_data === 'function' ? sertch_data() : document.querySelector("span[onclick='sertch_data();']").click());
-        // Wait for generation
-        console.log('   Waiting for report generation (2 mins)...');
-        await new Promise(r => setTimeout(r, 1100000)); 
+
+        console.log('   Searching Report 1...');
+        await page.evaluate(() => {
+            if(typeof sertch_data === 'function') sertch_data();
+            else document.querySelector("span[onclick='sertch_data();']").click();
+        });
+
+        console.log('   ⏳ Waiting 5 mins...');
+        await new Promise(resolve => setTimeout(resolve, 300000));
+        
+        try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
+        console.log('   Exporting Report 1...');
         await page.evaluate(() => document.getElementById('btnexport').click());
+        // Convert to CSV
         const file1 = await waitForDownloadAndRename(downloadPath, 'Report1_OverSpeed.xls');
 
-        // Report 2: Idling
-        console.log('📊 R2: Idling...');
+        // REPORT 2: Idling
+        console.log('📊 Processing Report 2: Idling...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/Report_02.php', { waitUntil: 'domcontentloaded' });
-        await page.waitForSelector('#date9');
-        await new Promise(r => setTimeout(r, 3000));
-        await page.evaluate((s, e) => {
-            document.getElementById('date9').value = s;
-            document.getElementById('date10').value = e;
+        await page.waitForSelector('#date9', { visible: true });
+        await new Promise(r => setTimeout(r, 10000));
+
+        await page.evaluate((start, end) => {
+            document.getElementById('date9').value = start;
+            document.getElementById('date10').value = end;
+            document.getElementById('date9').dispatchEvent(new Event('change'));
+            document.getElementById('date10').dispatchEvent(new Event('change'));
             if(document.getElementById('ddlMinute')) document.getElementById('ddlMinute').value = '10';
-            var sel = document.getElementById('ddl_truck');
-            for(var o of sel.options) if(o.text.includes('ทั้งหมด')) sel.value = o.value;
-            sel.dispatchEvent(new Event('change'));
+            var select = document.getElementById('ddl_truck'); 
+            if (select) { for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } select.dispatchEvent(new Event('change', { bubbles: true })); }
         }, startDateTime, endDateTime);
+        
         await page.click('td:nth-of-type(6) > span');
-        console.log('   Waiting for report generation (2 mins)...');
-        await new Promise(r => setTimeout(r, 1100000));
+        
+        console.log('   ⏳ Waiting 3 mins (Strict)...');
+        await new Promise(r => setTimeout(r, 180000));
+
         await page.evaluate(() => document.getElementById('btnexport').click());
         const file2 = await waitForDownloadAndRename(downloadPath, 'Report2_Idling.xls');
 
-        // Report 3: Sudden Brake
-        console.log('📊 R3: Sudden Brake...');
+        // REPORT 3: Sudden Brake
+        console.log('📊 Processing Report 3: Sudden Brake...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/report_hd.php', { waitUntil: 'domcontentloaded' });
-        await page.waitForSelector('#date9');
-        await new Promise(r => setTimeout(r, 3000));
-        await page.evaluate((s, e) => {
-            document.getElementById('date9').value = s;
-            document.getElementById('date10').value = e;
-            var sel = document.getElementById('ddl_truck');
-            for(var o of sel.options) if(o.text.includes('ทั้งหมด')) sel.value = o.value;
-            sel.dispatchEvent(new Event('change'));
+        await page.waitForSelector('#date9', { visible: true });
+        await new Promise(r => setTimeout(r, 10000));
+
+        await page.evaluate((start, end) => {
+            document.getElementById('date9').value = start;
+            document.getElementById('date10').value = end;
+            document.getElementById('date9').dispatchEvent(new Event('change'));
+            document.getElementById('date10').dispatchEvent(new Event('change'));
+            var select = document.getElementById('ddl_truck'); 
+            if (select) { for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } select.dispatchEvent(new Event('change', { bubbles: true })); }
         }, startDateTime, endDateTime);
+        
         await page.click('td:nth-of-type(6) > span');
-        console.log('   Waiting for report generation (2 mins)...');
-        await new Promise(r => setTimeout(r, 1100000));
+        
+        console.log('   ⏳ Waiting 3 mins (Strict)...'); 
+        await new Promise(r => setTimeout(r, 180000)); 
+
         await page.evaluate(() => {
-            const b = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('Excel'));
-            if(b) b.click();
+            const btns = Array.from(document.querySelectorAll('button'));
+            const b = btns.find(b => b.innerText.includes('Excel') || b.title === 'Excel');
+            if (b) b.click(); else document.querySelector('#table button:nth-of-type(3)')?.click();
         });
         const file3 = await waitForDownloadAndRename(downloadPath, 'Report3_SuddenBrake.xls');
 
-        // Report 4: Harsh Start (Optional handling)
-        console.log('📊 R4: Harsh Start...');
-        let file4 = null; // ย้ายมาประกาศข้างนอก try-catch
+        // REPORT 4: Harsh Start
+        console.log('📊 Processing Report 4: Harsh Start...');
         try {
             await page.goto('https://gps.dtc.co.th/ultimate/Report/report_ha.php', { waitUntil: 'domcontentloaded' });
-            await page.waitForSelector('#date9');
-            await new Promise(r => setTimeout(r, 3000));
-            await page.evaluate((s, e) => {
-                document.getElementById('date9').value = s;
-                document.getElementById('date10').value = e;
-                var sel = document.getElementById('ddl_truck');
-                for(var o of sel.options) if(o.text.includes('ทั้งหมด')) sel.value = o.value;
-                sel.dispatchEvent(new Event('change'));
+            await page.waitForSelector('#date9', { visible: true, timeout: 60000 });
+            await new Promise(r => setTimeout(r, 10000));
+            
+            console.log('   Setting Report 4 Conditions (Programmatic)...');
+            await page.evaluate((start, end) => {
+                document.getElementById('date9').value = start;
+                document.getElementById('date10').value = end;
+                document.getElementById('date9').dispatchEvent(new Event('change'));
+                document.getElementById('date10').dispatchEvent(new Event('change'));
+                const select = document.getElementById('ddl_truck');
+                if (select) {
+                    let found = false;
+                    for (let i = 0; i < select.options.length; i++) {
+                        if (select.options[i].text.includes('ทั้งหมด') || select.options[i].text.toLowerCase().includes('all')) {
+                            select.selectedIndex = i; found = true; break;
+                        }
+                    }
+                    if (!found && select.options.length > 0) select.selectedIndex = 0;
+                    select.dispatchEvent(new Event('change', { bubbles: true }));
+                    if (typeof $ !== 'undefined' && $(select).data('select2')) { $(select).trigger('change'); }
+                }
             }, startDateTime, endDateTime);
-            await page.evaluate(() => typeof sertch_data === 'function' ? sertch_data() : document.querySelector('td:nth-of-type(6) > span').click());
-            console.log('   Waiting for report generation (2 mins)...');
-            await new Promise(r => setTimeout(r, 1100000));
+            
             await page.evaluate(() => {
-                const b = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('Excel'));
-                if(b) b.click();
+                if (typeof sertch_data === 'function') { sertch_data(); } else { document.querySelector('td:nth-of-type(6) > span').click(); }
             });
-            file4 = await waitForDownloadAndRename(downloadPath, 'Report4_HarshStart.xls');
-        } catch (e) {
-            console.log('   ⚠️ Report 4 skipped or empty:', e.message);
+            
+            console.log('   ⏳ Waiting 3 mins (Strict)...');
+            await new Promise(r => setTimeout(r, 180000));
+            
+            console.log('   Clicking Export Report 4...');
+            await page.evaluate(() => {
+                const xpathResult = document.evaluate('//*[@id="table"]/div[1]/button[3]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                const btn = xpathResult.singleNodeValue;
+                if (btn) btn.click();
+                else {
+                    const allBtns = Array.from(document.querySelectorAll('button'));
+                    const excelBtn = allBtns.find(b => b.innerText.includes('Excel') || b.title === 'Excel');
+                    if (excelBtn) excelBtn.click(); else throw new Error("Cannot find Export button for Report 4");
+                }
+            });
+            const file4 = await waitForDownloadAndRename(downloadPath, 'Report4_HarshStart.xls');
+        } catch (error) {
+            console.error('❌ Report 4 Failed:', error.message);
         }
 
-        // Report 5: Forbidden
-        console.log('📊 R5: Forbidden Parking...');
+        // REPORT 5: Forbidden
+        console.log('📊 Processing Report 5: Forbidden Parking...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/Report_Instation.php', { waitUntil: 'domcontentloaded' });
-        await page.waitForSelector('#date9');
-        await new Promise(r => setTimeout(r, 3000));
-        await page.evaluate((s, e) => {
-            document.getElementById('date9').value = s;
-            document.getElementById('date10').value = e;
-            var sel = document.getElementById('ddl_truck');
-            for(var o of sel.options) if(o.text.includes('ทั้งหมด')) sel.value = o.value;
-            sel.dispatchEvent(new Event('change'));
-            // Select Forbidden Zone
-            var allS = document.getElementsByTagName('select');
-            for(var sl of allS) for(var op of sl.options) if(op.text.includes('พิ้น')) { sl.value = op.value; sl.dispatchEvent(new Event('change')); break; }
+        await page.waitForSelector('#date9', { visible: true });
+        await new Promise(r => setTimeout(r, 10000));
+        
+        await page.evaluate((start, end) => {
+            document.getElementById('date9').value = start;
+            document.getElementById('date10').value = end;
+            document.getElementById('date9').dispatchEvent(new Event('change'));
+            document.getElementById('date10').dispatchEvent(new Event('change'));
+            
+            // 1. รถทั้งหมด
+            var select = document.getElementById('ddl_truck'); 
+            if (select) { for (let opt of select.options) { if (opt.text.includes('ทั้งหมด')) { select.value = opt.value; break; } } select.dispatchEvent(new Event('change', { bubbles: true })); }
+            
+            // 2. พื้นที่ห้ามเข้า (Updated: Fix typo "พิ้น")
+            var allSelects = document.getElementsByTagName('select');
+            for(var s of allSelects) { 
+                for(var i=0; i<s.options.length; i++) { 
+                    const txt = s.options[i].text;
+                    if(txt.includes('พิ้น')) { 
+                        s.value = s.options[i].value; 
+                        s.dispatchEvent(new Event('change', { bubbles: true })); 
+                        break; 
+                    } 
+                } 
+            }
         }, startDateTime, endDateTime);
-        await new Promise(r => setTimeout(r, 3000)); // Wait for zones load
+        
+        await new Promise(r => setTimeout(r, 10000));
         await page.evaluate(() => {
-            var allS = document.getElementsByTagName('select');
-            for(var sl of allS) for(var op of sl.options) if(op.text.includes('สถานีทั้งหมด')) { sl.value = op.value; sl.dispatchEvent(new Event('change')); break; }
+            var allSelects = document.getElementsByTagName('select');
+            for(var s of allSelects) { for(var i=0; i<s.options.length; i++) { if(s.options[i].text.includes('สถานีทั้งหมด')) { s.value = s.options[i].value; s.dispatchEvent(new Event('change', { bubbles: true })); break; } } }
         });
+        
         await page.click('td:nth-of-type(7) > span');
-        console.log('   Waiting for report generation (2 mins)...');
-        await new Promise(r => setTimeout(r, 1100000));
+        
+        console.log('   ⏳ Waiting 3 mins (Strict)...');
+        await new Promise(r => setTimeout(r, 180000));
+        
+        try { await page.waitForSelector('#btnexport', { visible: true, timeout: 60000 }); } catch(e) {}
         await page.evaluate(() => document.getElementById('btnexport').click());
+        // Convert to CSV
         const file5 = await waitForDownloadAndRename(downloadPath, 'Report5_ForbiddenParking.xls');
+
 
 
         // =================================================================
