@@ -7,17 +7,16 @@ const archiver = require('archiver');
 const { parse } = require('csv-parse/sync');
 const ExcelJS = require('exceljs');
 
-// =================================================================
-// 1. HELPER FUNCTIONS (UTILITIES)
-// =================================================================
+// --- Helper Functions ---
 
-// รอโหลดไฟล์และเปลี่ยนชื่อ
+// 1. ฟังก์ชันรอโหลดไฟล์ และแปลงเป็น CSV (Universal Converter)
 async function waitForDownloadAndRename(downloadPath, newFileName, maxWaitMs = 300000) {
     console.log(`   Waiting for download: ${newFileName}...`);
     let downloadedFile = null;
     const checkInterval = 10000; 
     let waittime = 0;
 
+    // วนลูปรอไฟล์
     while (waittime < maxWaitMs) {
         const files = fs.readdirSync(downloadPath);
         downloadedFile = files.find(f => 
@@ -28,13 +27,8 @@ async function waitForDownloadAndRename(downloadPath, newFileName, maxWaitMs = 3
         );
         
         if (downloadedFile) {
-            // รออีกนิดเพื่อให้แน่ใจว่าเขียนไฟล์เสร็จ
-            await new Promise(r => setTimeout(r, 10000));
-            const stats = fs.statSync(path.join(downloadPath, downloadedFile));
-            if (stats.size > 0) {
-                console.log(`   ✅ File detected: ${downloadedFile}`);
-                break; 
-            }
+            console.log(`   ✅ File detected: ${downloadedFile} (${waittime/1000}s)`);
+            break; 
         }
         
         await new Promise(resolve => setTimeout(resolve, checkInterval));
@@ -43,61 +37,169 @@ async function waitForDownloadAndRename(downloadPath, newFileName, maxWaitMs = 3
 
     if (!downloadedFile) throw new Error(`Download timeout for ${newFileName}`);
 
+    await new Promise(resolve => setTimeout(resolve, 10000)); // รอเขียนไฟล์
+
     const oldPath = path.join(downloadPath, downloadedFile);
     const finalFileName = `DTC_Completed_${newFileName}`;
     const newPath = path.join(downloadPath, finalFileName);
     
-    // ลบไฟล์เก่าถ้ามี
+    // ตรวจสอบขนาด
+    const stats = fs.statSync(oldPath);
+    if (stats.size === 0) throw new Error(`Downloaded file is empty!`);
+
     if (fs.existsSync(newPath)) fs.unlinkSync(newPath);
     fs.renameSync(oldPath, newPath);
     
-    // แปลงเป็น CSV ทันที
+    // แปลงเป็น CSV (UTF-8) เสมอ
     const csvFileName = `Converted_${newFileName.replace('.xls', '.csv')}`;
     const csvPath = path.join(downloadPath, csvFileName);
-    await convertToCsv(newPath, csvPath);
+    await convertToCsv(newPath, csvPath); // ใช้ฟังก์ชันใหม่ที่รองรับทั้ง HTML/XLSX
     
     return csvPath;
 }
 
-// แปลงไฟล์ Excel/HTML เป็น CSV
+// 2. ฟังก์ชันแปลงไฟล์ (ฉลาดขึ้น รองรับทั้ง Binary XLSX และ HTML Table) -> CSV
 async function convertToCsv(sourcePath, destPath) {
     try {
-        console.log(`   🔄 Converting to CSV: ${path.basename(destPath)}`);
+        console.log(`   🔄 Converting to CSV...`);
         const buffer = fs.readFileSync(sourcePath);
         let rows = [];
 
-        // เช็คว่าเป็น XLSX (Binary) หรือไม่
+        // ตรวจสอบ Header ไฟล์ว่าเป็น Zip/XLSX หรือไม่ (PK..)
         const isXLSX = buffer.length > 4 && buffer[0] === 0x50 && buffer[1] === 0x4B;
 
         if (isXLSX) {
+            console.log('      - Detected: Binary XLSX (Using ExcelJS)');
             const workbook = new ExcelJS.Workbook();
             await workbook.xlsx.load(buffer);
-            const worksheet = workbook.getWorksheet(1);
+            const worksheet = workbook.getWorksheet(1); // อ่าน Sheet แรก
+            
             worksheet.eachRow((row) => {
+                // ExcelJS เริ่ม index 1, slice ออกเพื่อให้เป็น 0-based array
                 const rowValues = Array.isArray(row.values) ? row.values.slice(1) : [];
-                rows.push(rowValues.map(v => (v && typeof v === 'object') ? (v.text || v.result || '') : String(v || '').trim()));
+                rows.push(rowValues.map(v => {
+                    if (v === null || v === undefined) return '';
+                    if (typeof v === 'object') return v.text || v.result || ''; // Handle Rich Text
+                    return String(v).trim();
+                }));
             });
         } else {
-            // HTML Format (JSDOM)
+            console.log('      - Detected: HTML/Text (Using JSDOM)');
             const content = buffer.toString('utf8');
             const dom = new JSDOM(content);
             const table = dom.window.document.querySelector('table');
             if (table) {
                 const trs = Array.from(table.querySelectorAll('tr'));
-                rows = trs.map(tr => Array.from(tr.querySelectorAll('td, th')).map(td => td.textContent.replace(/\s+/g, ' ').trim()));
+                rows = trs.map(tr => 
+                    Array.from(tr.querySelectorAll('td, th')).map(td => td.textContent.replace(/\s+/g, ' ').trim())
+                );
+            } else {
+                console.warn('      ⚠️ No table found in HTML source.');
             }
         }
 
         if (rows.length > 0) {
-            let csvContent = '\uFEFF'; // BOM
+            // เขียน CSV พร้อม BOM
+            let csvContent = '\uFEFF'; 
             rows.forEach(row => {
-                const escapedRow = row.map(cell => cell.includes(',') || cell.includes('"') ? `"${cell.replace(/"/g, '""')}"` : cell);
+                const escapedRow = row.map(cell => {
+                    if (cell.includes(',') || cell.includes('"') || cell.includes('\n')) {
+                        return `"${cell.replace(/"/g, '""')}"`;
+                    }
+                    return cell;
+                });
                 csvContent += escapedRow.join(',') + '\n';
             });
             fs.writeFileSync(destPath, csvContent, 'utf8');
+            console.log(`   ✅ CSV Created: ${path.basename(destPath)}`);
+        } else {
+            console.warn('   ⚠️ No data extracted for CSV conversion.');
+            // Fallback: Copy original if conversion yields nothing (prevent crash)
+            // fs.copyFileSync(sourcePath, destPath); 
         }
+
     } catch (e) {
-        console.warn(`   ⚠️ CSV Conversion warning: ${e.message}`);
+        console.warn(`   ⚠️ CSV Conversion error: ${e.message}`);
+    }
+}
+
+// 3. ฟังก์ชันรอตารางข้อมูล
+async function waitForTableData(page, minRows = 2, timeout = 300000) {
+    console.log(`   Waiting for table data (Max ${timeout/1000}s)...`);
+    try {
+        await page.waitForFunction((min) => {
+            const rows = document.querySelectorAll('table tr');
+            const bodyText = document.body.innerText;
+            if (bodyText.includes('ไม่พบข้อมูล') || bodyText.includes('No data found')) return true; 
+            return rows.length >= min; 
+        }, { timeout: timeout }, minRows);
+        console.log('   ✅ Table data populated.');
+    } catch (e) {
+        console.warn('   ⚠️ Wait for table data timed out.');
+    }
+}
+
+// --- DATA PROCESSING HELPERS (Updated Logic) ---
+
+function parseDurationToSeconds(timeStr) {
+    if (!timeStr) return 0;
+    
+    // กรณี 1: "0 ชม. 1 นาที 31 วินาที"
+    const thaiMatch = timeStr.match(/(?:(\d+)\s*ชม\.)?\s*(?:(\d+)\s*นาที)?\s*(?:(\d+)\s*วินาที)?/);
+    if (thaiMatch && timeStr.includes('นาที')) {
+        const h = parseInt(thaiMatch[1] || 0);
+        const m = parseInt(thaiMatch[2] || 0);
+        const s = parseInt(thaiMatch[3] || 0);
+        return (h * 3600) + (m * 60) + s;
+    }
+   
+    // กรณี 2: "00:11:19" (HH:MM:SS)
+    if (timeStr.includes(':')) {
+        const parts = timeStr.split(':').map(Number);
+        if (parts.length === 3) return (parts[0] * 3600) + (parts[1] * 60) + parts[2];
+        if (parts.length === 2) return (parts[0] * 60) + parts[1]; // MM:SS
+    }
+   
+    return 0;
+}
+
+function formatSeconds(totalSeconds) {
+    const h = Math.floor(totalSeconds / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
+    const s = totalSeconds % 60;
+    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+}
+
+function processCSV(filePath, skipLines, colMap) {
+    try {
+        if (!fs.existsSync(filePath)) {
+            console.warn(`File not found: ${filePath}`);
+            return [];
+        }
+        
+        const fileContent = fs.readFileSync(filePath, 'utf8');
+        // ข้ามบรรทัด Header
+        const lines = fileContent.split('\n').slice(skipLines).join('\n');
+        
+        const records = parse(lines, {
+            columns: false,
+            skip_empty_lines: true,
+            relax_column_count: true,
+            bom: true
+        });
+   
+        return records.map(row => {
+            const data = {};
+            for (const [key, index] of Object.entries(colMap)) {
+                // index ที่ส่งมาเป็น 1-based (Excel Style) ต้องลบ 1
+                const idx = parseInt(index) - 1; 
+                data[key] = row[idx] ? row[idx].trim() : '';
+            }
+            return data;
+        }).filter(r => r.license); 
+    } catch (err) {
+        console.error(`Error reading ${filePath}:`, err.message);
+        return [];
     }
 }
 
@@ -119,119 +221,12 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     });
 }
 
-// =================================================================
-// 2. DATA PROCESSING & REPORT LOGIC (UPDATED)
-// =================================================================
-
-// แปลงเวลา (รองรับภาษาไทย และ HH:MM:SS)
-function parseDuration(str) {
-    if (!str) return 0;
-    str = str.toString().trim();
-    if (str.includes('นาที') || str.includes('ชม') || str.includes('วินาที')) {
-        const h = (str.match(/(\d+)\s*ชม/) || [0,0])[1];
-        const m = (str.match(/(\d+)\s*นาที/) || [0,0])[1];
-        const s = (str.match(/(\d+)\s*วินาที/) || [0,0])[1];
-        return (parseInt(h) * 3600) + (parseInt(m) * 60) + parseInt(s);
-    }
-    if (str.includes(':')) {
-        const parts = str.split(':').map(Number);
-        return parts.length === 3 ? (parts[0]*3600 + parts[1]*60 + parts[2]) : (parts[0]*60 + parts[1]);
-    }
-    return 0;
-}
-
-// แปลงวินาทีกลับเป็น HH:MM:SS
-function formatTime(sec) {
-    const h = Math.floor(sec / 3600);
-    const m = Math.floor((sec % 3600) / 60);
-    const s = sec % 60;
-    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-}
-
-// อ่าน CSV แบบดิบ (ใช้สำหรับ Process Logic ใหม่)
-function readCsvRaw(filePath, skipLines) {
-    if (!fs.existsSync(filePath)) return [];
-    const content = fs.readFileSync(filePath, 'utf8');
-    const lines = content.split('\n').slice(skipLines).join('\n');
-    return parse(lines, { columns: false, skip_empty_lines: true, relax_column_count: true, bom: true });
-}
-
-// ฟังก์ชัน Pivot (รวมเวลา) -> Return Top 10
-function aggregateData(filePath, skipLines, colIdx) {
-    if (!filePath || !fs.existsSync(filePath)) return { list: [], totalEvents: 0 };
-    
-    const records = readCsvRaw(filePath, skipLines);
-    const pivot = {};
-    let totalCount = 0;
-
-    records.forEach(row => {
-        // CSV Parse จะ return array 0-based.
-        // ปรับปรุง: ใช้ index ตามที่ config มาเลย ไม่ต้องลบ 1 ซ้ำซ้อน ถ้า config เป็น 0-based แล้ว
-        // หรือถ้า config เป็น 1-based (แบบ Excel) ก็ลบ 1 ถูกแล้ว แต่ต้องเช็คให้แน่ใจ
-        // สมมติว่า config ที่ให้มาคือ 1-based (Col A=1)
-        const license = row[colIdx.license - 1];
-        const duration = row[colIdx.duration - 1];
-
-        // เพิ่ม logging เพื่อ debug ถ้าไม่เจอข้อมูล
-        // if (!license) console.log('Row missing license:', row);
-
-        if (!license || !duration || license.includes('รวม') || license.includes('รถทั้งหมด')) return;
-
-        const key = license.trim();
-        const sec = parseDuration(duration);
-
-        if (!pivot[key]) {
-            pivot[key] = { 
-                license: key, 
-                station: colIdx.station ? (row[colIdx.station - 1] || '-') : '-',
-                count: 0, 
-                time: 0 
-            };
-        }
-        pivot[key].count++;
-        pivot[key].time += sec;
-        totalCount++;
-    });
-
-    // เรียงตามเวลา (มาก->น้อย) และตัดมา 10 อันดับ
-    const sortedList = Object.values(pivot)
-        .sort((a, b) => b.time - a.time)
-        .slice(0, 10);
-
-    return { list: sortedList, totalEvents: totalCount };
-}
-
-// ฟังก์ชันดึงรายการเหตุการณ์ (Critical) -> Return Top 10
-function getCriticalEvents(filePath, skipLines, colIdx) {
-    if (!filePath || !fs.existsSync(filePath)) return [];
-    
-    const records = readCsvRaw(filePath, skipLines);
-    const events = [];
-
-    records.forEach(row => {
-        const license = row[colIdx.license - 1];
-        if (!license || license.includes('รวม')) return;
-
-        events.push({
-            license: license.trim(),
-            desc: `${row[colIdx.v1 - 1]} -> ${row[colIdx.v2 - 1]} km/h`
-        });
-    });
-
-    return events.slice(0, 10);
-}
-
-// =================================================================
-// 3. MAIN SCRIPT
-// =================================================================
+// --- Main Script ---
 
 (async () => {
-    // ใส่ Secret ตรงนี้ หรือใช้ process.env ถ้า Run ผ่าน Github Action
     const { DTC_USERNAME, DTC_PASSWORD, EMAIL_USER, EMAIL_PASS, EMAIL_TO } = process.env;
-    
-    // Validation
     if (!DTC_USERNAME || !DTC_PASSWORD) {
-        console.error('❌ Error: Missing Secrets (DTC_USERNAME, DTC_PASSWORD).');
+        console.error('❌ Error: Missing Secrets.');
         process.exit(1);
     }
 
@@ -239,35 +234,43 @@ function getCriticalEvents(filePath, skipLines, colIdx) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation...');
+    console.log('🚀 Starting DTC Automation (CSV Fix & New PDF)...');
     
     const browser = await puppeteer.launch({
-        headless: true, // ตั้งเป็น false ถ้าอยากเห็นจอ
+        headless: true,
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--start-maximized']
     });
 
     const page = await browser.newPage();
+    page.setDefaultNavigationTimeout(3600000); 
+    page.setDefaultTimeout(3600000);
+    
     const client = await page.target().createCDPSession();
     await client.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadPath });
+    
     await page.setViewport({ width: 1920, height: 1080 });
+    await page.emulateTimezone('Asia/Bangkok');
 
     try {
-        // --- STEP 1: Login ---
-        console.log('🔑 Login...');
-        await page.goto('https://gps.dtc.co.th/ultimate/index.php', { waitUntil: 'networkidle2' });
+        // Step 1: Login
+        console.log('1️⃣ Step 1: Login...');
+        await page.goto('https://gps.dtc.co.th/ultimate/index.php', { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('#txtname', { visible: true, timeout: 60000 });
         await page.type('#txtname', DTC_USERNAME);
         await page.type('#txtpass', DTC_PASSWORD);
         await Promise.all([
-            page.click('#btnLogin'),
-            page.waitForNavigation({ waitUntil: 'networkidle2' })
+            page.evaluate(() => document.getElementById('btnLogin').click()),
+            page.waitForFunction(() => !document.querySelector('#txtname'), { timeout: 60000 })
         ]);
-        console.log('   Login Success');
+        console.log('✅ Login Success');
 
         const todayStr = getTodayFormatted();
         const startDateTime = `${todayStr} 06:00`;
         const endDateTime = `${todayStr} 18:00`;
+        console.log(`🕒 Global Time Settings: ${startDateTime} to ${endDateTime}`);
 
-        // --- STEP 2-6: Download Reports ---
+        // --- Step 2 to 6: DOWNLOAD REPORTS (STRICT WAIT & AUTOMATIC CSV CONVERSION) ---
+        
         // REPORT 1: Over Speed
         console.log('📊 Processing Report 1: Over Speed...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/Report_03.php', { waitUntil: 'domcontentloaded' });
@@ -453,185 +456,333 @@ function getCriticalEvents(filePath, skipLines, colIdx) {
         // Convert to CSV
         const file5 = await waitForDownloadAndRename(downloadPath, 'Report5_ForbiddenParking.xls');
 
-
-
         // =================================================================
-        // STEP 7: Generate PDF Summary (IMPROVED LOGIC)
+        // STEP 7: Generate PDF Summary (USING CSV DATA)
         // =================================================================
-        console.log('📑 Step 7: Generating Final PDF Report...');
+        console.log('📑 Step 7: Generating PDF Summary...');
 
-        // Config Data Structure (1-based index to match user habits, handled in aggregateData)
-        // ตรวจสอบ Index จากไฟล์ CSV ตัวอย่าง:
-        // Report 1: Col 2 (Name) -> Index 2, Col 5 (Duration) -> Index 5 ??
-        // ลองเช็คจาก snippet: "ลำดับ,ชื่อรถ,วันที่บันทึก..." -> ชื่อรถคือ Col 2 (Index 1 in 0-based)
-        // "รวมเวลา" คือ Col 5 (Index 4 in 0-based)
-        // ดังนั้น Config: license: 2, duration: 5 (ถ้า function ลบ 1 ให้)
-        
-        // แก้ไข DATA_CONFIG ให้ตรงกับ CSV output จริงๆ (ดูจาก snippet)
-        // Report 1 (OverSpeed): Col 2=ชื่อรถ, Col 5=รวมเวลา -> 1-based: 2, 5
-        // Report 2 (Idling): Col 2=ชื่อรถ, Col 5=รวมเวลา -> 1-based: 2, 5
-        // Report 3 (Sudden): Col 2=ชื่อรถ, Col 3=ทะเบียน, Col 5=v1, Col 6=v2 -> 1-based: 3 (ทะเบียน), 5, 6
-        // Report 4 (Harsh): Col 2=ชื่อรถ, Col 3=ทะเบียน, Col 5=v1, Col 6=v2 -> 1-based: 3 (ทะเบียน), 5, 6
-        // Report 5 (Forbidden): Col 2=ทะเบียน, Col 5=สถานี, Col 10=รวมเวลา -> 1-based: 2, 5, 10
-        
-        const DATA_CONFIG = {
-            OVERSPEED: { skip: 6, license: 2, duration: 5 }, 
-            IDLING: { skip: 7, license: 2, duration: 5 },    
-            SUDDEN: { skip: 5, license: 3, v1: 5, v2: 6 },   
-            HARSH: { skip: 5, license: 3, v1: 5, v2: 6 },    
-            FORBIDDEN: { skip: 1, license: 2, station: 5, duration: 10 } 
+        const FILES_CSV = {
+            OVERSPEED: file1,
+            IDLING: file2,
+            SUDDEN_BRAKE: file3,
+            HARSH_START: typeof file4 !== 'undefined' ? file4 : '',
+            PROHIBITED: file5
         };
 
-        // 1. Process Data
-        const r1 = aggregateData(file1, DATA_CONFIG.OVERSPEED.skip, DATA_CONFIG.OVERSPEED);
-        const r2 = aggregateData(file2, DATA_CONFIG.IDLING.skip, DATA_CONFIG.IDLING);
-        const r5 = aggregateData(file5, DATA_CONFIG.FORBIDDEN.skip, DATA_CONFIG.FORBIDDEN);
+        // 1. Process Report 1: Over Speed
+        // (CSV Index: 0=No, 1=License, ..., Last=Duration)
+        const rawSpeed = processCSV(FILES_CSV.OVERSPEED, 5, { license: 1, duration: 4 }); 
+        const speedStats = {};
+        rawSpeed.forEach(r => {
+            if (!speedStats[r.license]) speedStats[r.license] = { count: 0, time: 0, license: r.license };
+            speedStats[r.license].count++;
+            speedStats[r.license].time += parseDurationToSeconds(r.duration);
+        });
+        const topSpeed = Object.values(speedStats).sort((a, b) => b.count - a.count).slice(0, 5);
+        const totalOverSpeed = rawSpeed.length;
+
+        // 2. Process Report 2: Idling
+        const rawIdling = processCSV(FILES_CSV.IDLING, 6, { license: 1, duration: 4 });
+        const idleStats = {};
+        rawIdling.forEach(r => {
+            if (!idleStats[r.license]) idleStats[r.license] = { count: 0, time: 0, license: r.license };
+            idleStats[r.license].count++;
+            idleStats[r.license].time += parseDurationToSeconds(r.duration);
+        });
+        const topIdle = Object.values(idleStats).sort((a, b) => b.time - a.time).slice(0, 5);
+        const maxIdleCar = topIdle.length > 0 ? topIdle[0] : { time: 0, license: '-' };
+
+        // 3. Process Report 3 & 4
+        const rawBrake = fs.existsSync(FILES_CSV.SUDDEN_BRAKE) ? processCSV(FILES_CSV.SUDDEN_BRAKE, 4, { license: 2, v_start: 4, v_end: 5 }) : [];
+        const rawStart = (FILES_CSV.HARSH_START && fs.existsSync(FILES_CSV.HARSH_START)) ? processCSV(FILES_CSV.HARSH_START, 4, { license: 2, v_start: 4, v_end: 5 }) : [];
         
-        const r3_list = getCriticalEvents(file3, DATA_CONFIG.SUDDEN.skip, DATA_CONFIG.SUDDEN);
-        const r4_list = (file4) ? getCriticalEvents(file4, DATA_CONFIG.HARSH.skip, DATA_CONFIG.HARSH) : [];
+        const criticalEvents = [
+            ...rawBrake.map(r => ({ ...r, type: 'Sudden Brake', level: 'High' })),
+            ...rawStart.map(r => ({ ...r, type: 'Harsh Start', level: 'Medium' }))
+        ];
 
-        // Count Critical
-        const totalCritical = (readCsvRaw(file3, DATA_CONFIG.SUDDEN.skip).length) + 
-                              (file4 ? readCsvRaw(file4, DATA_CONFIG.HARSH.skip).length : 0);
+        // 4. Process Report 5
+        const rawForbidden = processCSV(FILES_CSV.PROHIBITED, 5, { license: 1, station: 4, duration: 9 });
+        const forbiddenList = rawForbidden.map(r => ({
+            license: r.license,
+            station: r.station,
+            timeSec: parseDurationToSeconds(r.duration),
+            timeStr: r.duration
+        })).sort((a, b) => b.timeSec - a.timeSec).slice(0, 8);
+        
+        const forbiddenChartStats = {};
+        rawForbidden.forEach(r => {
+            if(!forbiddenChartStats[r.license]) forbiddenChartStats[r.license] = 0;
+            forbiddenChartStats[r.license] += parseDurationToSeconds(r.duration);
+        });
+        const topForbiddenChart = Object.entries(forbiddenChartStats)
+            .map(([license, time]) => ({ license, time }))
+            .sort((a, b) => b.time - a.time).slice(0, 5);
 
-        const maxIdleCar = r2.list.length > 0 ? r2.list[0] : { time: 0, license: '-' };
-
-        // 2. Generate HTML
+        // --- HTML GENERATION ---
+        const today = new Date().toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric' });
+        
         const html = `
         <!DOCTYPE html>
-        <html lang="th">
+        <html>
         <head>
-            <meta charset="UTF-8">
             <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@300;400;600;700&display=swap" rel="stylesheet">
             <style>
-                @page { size: A4; margin: 0; }
-                body { font-family: 'Noto Sans Thai', sans-serif; margin: 0; background: #fff; color: #333; -webkit-print-color-adjust: exact; }
-                .page { width: 210mm; height: 296mm; position: relative; page-break-after: always; padding: 40px; box-sizing: border-box; }
-                h1 { color: #1E40AF; font-size: 28px; margin: 0 0 10px 0; text-align: center; }
-                .sub-head { text-align: center; color: #6B7280; margin-bottom: 40px; }
-                .header-banner { background: #1E40AF; color: white; padding: 12px 20px; font-size: 20px; font-weight: bold; margin-bottom: 20px; border-radius: 4px; }
-                .bg-orange { background: #F59E0B; }
-                .bg-red { background: #DC2626; }
-                .bg-purple { background: #9333EA; }
-                .grid-2x2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 40px; }
-                .card { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 12px; padding: 25px; text-align: center; }
-                .card-val { font-size: 42px; font-weight: bold; margin: 10px 0; }
-                .text-blue { color: #1E40AF; } .text-orange { color: #F59E0B; } .text-red { color: #DC2626; } .text-purple { color: #9333EA; }
-                .chart-box { margin: 20px 0; }
-                .bar-row { display: flex; align-items: center; margin-bottom: 8px; font-size: 12px; }
-                .bar-lbl { width: 180px; text-align: right; padding-right: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
-                .bar-trk { flex-grow: 1; background: #F1F5F9; height: 20px; border-radius: 4px; overflow: hidden; }
-                .bar-fill { height: 100%; display: flex; align-items: center; justify-content: flex-end; padding-right: 8px; color: white; font-weight: bold; font-size: 11px; }
-                table { width: 100%; border-collapse: collapse; font-size: 12px; }
-                th { color: white; padding: 8px; text-align: left; }
-                td { padding: 8px; border-bottom: 1px solid #E2E8F0; }
-                tr:nth-child(even) { background: #F8FAFC; }
-                .num { text-align: center; }
-                .time { text-align: right; font-family: monospace; font-weight: 600; }
-                .badge { padding: 2px 8px; border-radius: 10px; color: white; font-size: 10px; }
+            @page { size: A4; margin: 0; }
+            body { font-family: 'Noto Sans Thai', sans-serif; margin: 0; padding: 0; background: #fff; color: #333; }
+            .page { width: 210mm; height: 296mm; position: relative; page-break-after: always; overflow: hidden; }
+            .content { padding: 40px; }
+            
+            .header-banner { background: #1E40AF; color: white; padding: 15px 40px; font-size: 24px; font-weight: bold; margin-bottom: 30px; }
+            h1 { font-size: 32px; color: #1E40AF; margin-bottom: 10px; }
+            
+            .grid-2x2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 50px; }
+            .card { background: #F8FAFC; border-radius: 12px; padding: 30px; text-align: center; border: 1px solid #E2E8F0; }
+            .card-title { font-size: 18px; font-weight: bold; margin-bottom: 10px; }
+            .card-value { font-size: 48px; font-weight: bold; margin: 10px 0; }
+            .card-sub { font-size: 14px; color: #64748B; }
+            
+            .c-blue { color: #1E40AF; }
+            .c-orange { color: #F59E0B; }
+            .c-red { color: #DC2626; }
+            .c-purple { color: #9333EA; }
+            
+            .chart-container { margin: 40px 0; }
+            .bar-row { display: flex; align-items: center; margin-bottom: 15px; }
+            .bar-label { width: 180px; text-align: right; padding-right: 15px; font-weight: 600; font-size: 14px; }
+            .bar-track { flex-grow: 1; background: #F1F5F9; height: 30px; border-radius: 4px; overflow: hidden; }
+            .bar-fill { height: 100%; display: flex; align-items: center; justify-content: flex-end; padding-right: 10px; color: white; font-size: 12px; font-weight: bold; }
+            
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            th { background: #1E40AF; color: white; padding: 12px; text-align: left; }
+            td { padding: 10px; border-bottom: 1px solid #E2E8F0; }
+            tr:nth-child(even) { background: #F8FAFC; }
+            .risk-High { color: #DC2626; font-weight: bold; }
+            .risk-Medium { color: #F59E0B; font-weight: bold; }
             </style>
         </head>
         <body>
-            <!-- PAGE 1: Summary -->
+
+            <!-- Page 1: Executive Summary -->
             <div class="page">
-                <h1>รายงานสรุปพฤติกรรมการขับขี่</h1>
-                <div class="sub-head">Fleet Safety Report | ประจำวันที่: ${todayStr}</div>
-                <div class="header-banner" style="text-align:center;">บทสรุปผู้บริหาร (Executive Summary)</div>
+            <div style="text-align: center; padding-top: 60px;">
+                <h1 style="font-size: 48px;">รายงานสรุปพฤติกรรมการขับขี่</h1>
+                <div style="font-size: 24px; color: #64748B;">Fleet Safety & Telematics Analysis Report</div>
+                <div style="margin-top: 20px; font-size: 18px;">ประจำวันที่: ${today}</div>
+            </div>
+
+            <div class="content">
+                <div class="header-banner" style="margin-top: 40px; text-align: center;">บทสรุปผู้บริหาร (Executive Summary)</div>
+                
                 <div class="grid-2x2">
-                    <div class="card"><div style="font-weight:bold;">Over Speed (ครั้ง)</div><div class="card-val text-blue">${r1.totalEvents}</div><div style="font-size:12px; color:#666;">เหตุการณ์ทั้งหมด</div></div>
-                    <div class="card"><div style="font-weight:bold;">Max Idling (นาที)</div><div class="card-val text-orange">${Math.round(maxIdleCar.time / 60)}m</div><div style="font-size:12px; color:#666;">${maxIdleCar.license}</div></div>
-                    <div class="card"><div style="font-weight:bold;">Critical Events</div><div class="card-val text-red">${totalCritical}</div><div style="font-size:12px; color:#666;">เบรก/ออกตัว กระชาก</div></div>
-                    <div class="card"><div style="font-weight:bold;">พื้นที่ห้ามจอด</div><div class="card-val text-purple">${r5.totalEvents}</div><div style="font-size:12px; color:#666;">จำนวนครั้ง</div></div>
+                <div class="card">
+                    <div class="card-title c-blue">Over Speed (ครั้ง)</div>
+                    <div class="card-value c-blue">${totalOverSpeed}</div>
+                    <div class="card-sub">เหตุการณ์ทั้งหมด</div>
+                </div>
+                <div class="card">
+                    <div class="card-title c-orange">Max Idling (สูงสุด)</div>
+                    <div class="card-value c-orange">${Math.round(maxIdleCar.time / 60)}m</div>
+                    <div class="card-sub">${maxIdleCar.license}</div>
+                </div>
+                <div class="card">
+                    <div class="card-title c-red">Critical Events</div>
+                    <div class="card-value c-red">${criticalEvents.length}</div>
+                    <div class="card-sub">เบรก/ออกตัว กระชาก</div>
+                </div>
+                <div class="card">
+                    <div class="card-title c-purple">พื้นที่ห้ามจอด</div>
+                    <div class="card-value c-purple">${rawForbidden.length}</div>
+                    <div class="card-sub">จำนวนครั้งทั้งหมด</div>
+                </div>
                 </div>
             </div>
+            </div>
 
-            <!-- PAGE 2: Over Speed -->
+            <!-- Page 2: Over Speed -->
             <div class="page">
-                <div class="header-banner">1. การใช้ความเร็วเกินกำหนด (Top 10 by Duration)</div>
-                <div class="chart-box">
-                    ${r1.list.map(x => `<div class="bar-row"><div class="bar-lbl">${x.license}</div><div class="bar-trk"><div class="bar-fill" style="width:${(x.time/r1.list[0].time)*100}%; background:#1E40AF;">${formatTime(x.time)}</div></div></div>`).join('')}
+            <div class="header-banner">1. การใช้ความเร็วเกินกำหนด (Over Speed Analysis)</div>
+            <div class="content">
+                <h3>Top 5 Over Speed Frequency</h3>
+                <div class="chart-container">
+                ${topSpeed.map(item => `
+                    <div class="bar-row">
+                    <div class="bar-label">${item.license}</div>
+                    <div class="bar-track">
+                        <div class="bar-fill" style="width: ${(item.count / (topSpeed[0]?.count || 1)) * 100}%; background: #1E40AF;">${item.count}</div>
+                    </div>
+                    </div>
+                `).join('')}
                 </div>
-                <table><thead><tr><th style="background:#1E40AF; width:40px;">No.</th><th style="background:#1E40AF;">ทะเบียนรถ</th><th style="background:#1E40AF;" class="num">ครั้ง</th><th style="background:#1E40AF;" class="time">รวมเวลา</th></tr></thead><tbody>
-                    ${r1.list.map((x, i) => `<tr><td>${i+1}</td><td>${x.license}</td><td class="num">${x.count}</td><td class="time">${formatTime(x.time)}</td></tr>`).join('')}
-                </tbody></table>
+
+                <table>
+                <thead>
+                    <tr><th>No.</th><th>ทะเบียนรถ</th><th>จำนวนครั้ง</th><th>รวมเวลา</th></tr>
+                </thead>
+                <tbody>
+                    ${topSpeed.map((item, idx) => `
+                    <tr>
+                        <td>${idx + 1}</td>
+                        <td>${item.license}</td>
+                        <td>${item.count}</td>
+                        <td>${formatSeconds(item.time)}</td>
+                    </tr>
+                    `).join('')}
+                </tbody>
+                </table>
+            </div>
             </div>
 
-            <!-- PAGE 3: Idling -->
+            <!-- Page 3: Idling -->
             <div class="page">
-                <div class="header-banner bg-orange">2. การจอดไม่ดับเครื่อง (Top 10 by Duration)</div>
-                <div class="chart-box">
-                    ${r2.list.map(x => `<div class="bar-row"><div class="bar-lbl">${x.license}</div><div class="bar-trk"><div class="bar-fill" style="width:${(x.time/r2.list[0].time)*100}%; background:#F59E0B;">${formatTime(x.time)}</div></div></div>`).join('')}
+            <div class="header-banner">2. การจอดไม่ดับเครื่อง (Idling Analysis)</div>
+            <div class="content">
+                <h3>Top 5 Idling Duration (Minutes)</h3>
+                <div class="chart-container">
+                ${topIdle.map(item => `
+                    <div class="bar-row">
+                    <div class="bar-label">${item.license}</div>
+                    <div class="bar-track">
+                        <div class="bar-fill" style="width: ${(item.time / (topIdle[0]?.time || 1)) * 100}%; background: #F59E0B;">${Math.round(item.time / 60)}m</div>
+                    </div>
+                    </div>
+                `).join('')}
                 </div>
-                <table><thead><tr><th style="background:#F59E0B; width:40px;">No.</th><th style="background:#F59E0B;">ทะเบียนรถ</th><th style="background:#F59E0B;" class="num">ครั้ง</th><th style="background:#F59E0B;" class="time">รวมเวลา</th></tr></thead><tbody>
-                    ${r2.list.map((x, i) => `<tr><td>${i+1}</td><td>${x.license}</td><td class="num">${x.count}</td><td class="time">${formatTime(x.time)}</td></tr>`).join('')}
-                </tbody></table>
+
+                <table>
+                <thead>
+                    <tr><th>No.</th><th>ทะเบียนรถ</th><th>จำนวนครั้ง</th><th>รวมเวลา</th></tr>
+                </thead>
+                <tbody>
+                    ${topIdle.map((item, idx) => `
+                    <tr>
+                        <td>${idx + 1}</td>
+                        <td>${item.license}</td>
+                        <td>${item.count}</td>
+                        <td>${formatSeconds(item.time)}</td>
+                    </tr>
+                    `).join('')}
+                </tbody>
+                </table>
+            </div>
             </div>
 
-            <!-- PAGE 4: Critical -->
+            <!-- Page 4: Critical Events -->
             <div class="page">
-                <div class="header-banner bg-red">3. เหตุการณ์วิกฤต (Critical Safety Events)</div>
-                <h3 style="color:#DC2626; border-left:4px solid #DC2626; padding-left:10px;">3.1 เบรกกะทันหัน (Sudden Brake)</h3>
-                <table><thead><tr><th style="background:#DC2626; width:40px;">No.</th><th style="background:#DC2626;">ทะเบียนรถ</th><th style="background:#DC2626;">รายละเอียด</th><th style="background:#DC2626;" class="num">ระดับ</th></tr></thead><tbody>
-                    ${r3_list.map((x, i) => `<tr><td>${i+1}</td><td>${x.license}</td><td>${x.desc}</td><td class="num"><span class="badge bg-red">High</span></td></tr>`).join('')}
-                </tbody></table>
-                <h3 style="color:#F59E0B; border-left:4px solid #F59E0B; padding-left:10px; margin-top:30px;">3.2 ออกตัวกระชาก (Harsh Start)</h3>
-                <table><thead><tr><th style="background:#F59E0B; width:40px;">No.</th><th style="background:#F59E0B;">ทะเบียนรถ</th><th style="background:#F59E0B;">รายละเอียด</th><th style="background:#F59E0B;" class="num">ระดับ</th></tr></thead><tbody>
-                    ${r4_list.map((x, i) => `<tr><td>${i+1}</td><td>${x.license}</td><td>${x.desc}</td><td class="num"><span class="badge bg-orange">Medium</span></td></tr>`).join('')}
-                </tbody></table>
+            <div class="header-banner">3. เหตุการณ์วิกฤต (Critical Safety Events)</div>
+            <div class="content">
+                <table>
+                <thead>
+                    <tr><th>No.</th><th>ทะเบียนรถ</th><th>รายละเอียด</th><th>ประเภท</th></tr>
+                </thead>
+                <tbody>
+                    ${criticalEvents.map((item, idx) => `
+                    <tr>
+                        <td>${idx + 1}</td>
+                        <td>${item.license}</td>
+                        <td>Speed: ${item.v_start} &#8594; ${item.v_end} km/h</td>
+                        <td class="risk-${item.level}">${item.type}</td>
+                    </tr>
+                    `).join('')}
+                </tbody>
+                </table>
+            </div>
             </div>
 
-            <!-- PAGE 5: Forbidden -->
+            <!-- Page 5: Prohibited Parking -->
             <div class="page">
-                <div class="header-banner bg-purple">4. พื้นที่ห้ามจอด (Top 10 by Duration)</div>
-                <div class="chart-box">
-                    ${r5.list.map(x => `<div class="bar-row"><div class="bar-lbl">${x.license}</div><div class="bar-trk"><div class="bar-fill" style="width:${(x.time/r5.list[0].time)*100}%; background:#9333EA;">${formatTime(x.time)}</div></div></div>`).join('')}
+            <div class="header-banner">4. รายงานพื้นที่ห้ามจอด (Prohibited Parking Area Report)</div>
+            <div class="content">
+                <h3>Top 5 Prohibited Area Duration</h3>
+                <div class="chart-container">
+                ${topForbiddenChart.map(item => `
+                    <div class="bar-row">
+                    <div class="bar-label">${item.license}</div>
+                    <div class="bar-track">
+                        <div class="bar-fill" style="width: ${(item.time / (topForbiddenChart[0]?.time || 1)) * 100}%; background: #9333EA;">${Math.round(item.time / 60)}m</div>
+                    </div>
+                    </div>
+                `).join('')}
                 </div>
-                <table><thead><tr><th style="background:#9333EA; width:40px;">No.</th><th style="background:#9333EA;">ทะเบียนรถ</th><th style="background:#9333EA;">สถานีล่าสุด</th><th style="background:#9333EA;" class="num">ครั้ง</th><th style="background:#9333EA;" class="time">รวมเวลา</th></tr></thead><tbody>
-                    ${r5.list.map((x, i) => `<tr><td>${i+1}</td><td>${x.license}</td><td>${x.station}</td><td class="num">${x.count}</td><td class="time">${formatTime(x.time)}</td></tr>`).join('')}
-                </tbody></table>
+
+                <table>
+                <thead>
+                    <tr><th>No.</th><th>ทะเบียนรถ</th><th>ชื่อสถานี</th><th>รวมเวลา</th></tr>
+                </thead>
+                <tbody>
+                    ${forbiddenList.map((item, idx) => `
+                    <tr>
+                        <td>${idx + 1}</td>
+                        <td>${item.license}</td>
+                        <td>${item.station}</td>
+                        <td>${item.timeStr}</td>
+                    </tr>
+                    `).join('')}
+                </tbody>
+                </table>
             </div>
+            </div>
+
         </body>
-        </html>`;
+        </html>
+        `;
 
         await page.setContent(html, { waitUntil: 'networkidle0' });
         const pdfPath = path.join(downloadPath, 'Fleet_Safety_Analysis_Report.pdf');
         await page.pdf({
             path: pdfPath,
             format: 'A4',
-            printBackground: true,
-            margin: { top: 0, bottom: 0, left: 0, right: 0 }
+            printBackground: true
         });
-        console.log(`✅ PDF Generated: ${pdfPath}`);
+        console.log(`   ✅ PDF Generated: ${pdfPath}`);
 
-        // --- STEP 8: Email ---
-        console.log('📧 Sending Email...');
+        // =================================================================
+        // STEP 8: Zip & Email
+        // =================================================================
+        console.log('📧 Step 8: Zipping CSVs & Sending Email...');
+        
         const allFiles = fs.readdirSync(downloadPath);
         const csvsToZip = allFiles.filter(f => f.startsWith('Converted_') && f.endsWith('.csv'));
-        const zipName = `DTC_Report_${todayStr.replace(/ /g, '_')}.zip`;
-        const zipPath = path.join(downloadPath, zipName);
-        
-        if (csvsToZip.length > 0) await zipFiles(downloadPath, zipPath, csvsToZip);
 
-        const transporter = nodemailer.createTransport({
-            service: 'gmail',
-            auth: { user: EMAIL_USER, pass: EMAIL_PASS }
-        });
+        if (csvsToZip.length > 0 || fs.existsSync(pdfPath)) {
+            const zipName = `DTC_Report_Data_${today.replace(/ /g, '_')}.zip`;
+            const zipPath = path.join(downloadPath, zipName);
+            
+            if(csvsToZip.length > 0) {
+                await zipFiles(downloadPath, zipPath, csvsToZip);
+            }
 
-        await transporter.sendMail({
-            from: `"DTC Reporter" <${EMAIL_USER}>`,
-            to: EMAIL_TO,
-            subject: `รายงานสรุปพฤติกรรมการขับขี่ (Fleet Safety Report) - ${todayStr}`,
-            text: `เรียน ผู้เกี่ยวข้อง\n\nนำส่งรายงานประจำวัน (PDF + CSV)\n\nขอบคุณครับ`,
-            attachments: [
-                { filename: zipName, path: zipPath },
-                { filename: 'Fleet_Safety_Report.pdf', path: pdfPath }
-            ]
-        });
-        console.log(`✅ Email Sent!`);
+            const attachments = [];
+            if (fs.existsSync(zipPath)) attachments.push({ filename: zipName, path: zipPath });
+            if (fs.existsSync(pdfPath)) attachments.push({ filename: 'Fleet_Safety_Analysis_Report.pdf', path: pdfPath });
+
+            const transporter = nodemailer.createTransport({
+                service: 'gmail',
+                auth: { user: EMAIL_USER, pass: EMAIL_PASS }
+            });
+
+            await transporter.sendMail({
+                from: `"DTC Reporter" <${EMAIL_USER}>`,
+                to: EMAIL_TO,
+                subject: `รายงานสรุปพฤติกรรมการขับขี่ (Fleet Safety Report) - ${today}`,
+                text: `เรียน ผู้เกี่ยวข้อง\n\nระบบส่งรายงานประจำวัน (06:00 - 18:00) ดังแนบ:\n1. ไฟล์ข้อมูลดิบ CSV (อยู่ใน Zip)\n2. ไฟล์ PDF สรุปภาพรวม\n\nขอบคุณครับ\nDTC Automation Bot`,
+                attachments: attachments
+            });
+            console.log(`   ✅ Email Sent Successfully!`);
+        } else {
+            console.warn('⚠️ No files to send!');
+        }
+
+        console.log('🧹 Cleanup...');
+        // fs.rmSync(downloadPath, { recursive: true, force: true });
+        console.log('   ✅ Cleanup Complete.');
 
     } catch (err) {
         console.error('❌ Fatal Error:', err);
+        await page.screenshot({ path: path.join(downloadPath, 'fatal_error.png') });
+        process.exit(1);
     } finally {
         await browser.close();
+        console.log('🏁 Browser Closed.');
     }
 })();
