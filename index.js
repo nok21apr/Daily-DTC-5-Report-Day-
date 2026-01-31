@@ -1,12 +1,11 @@
 /**
  * DTC Automation Script
- * Version: 3.0.0 (Revised based on User Requirements V3)
+ * Version: 3.1.0 (Fix Empty Pages & Graph)
  * Last Updated: 31/01/2026
  * Changes:
- * - Report 1 & 2: License=Col B, Time=Col D - Col C
- * - Report 3 & 4: License=Col B, Show Date from Col D, Speed E->F
- * - Report 5: Graph strictly HH:MM:SS, Table Header renamed
- * - All: Dynamic Header Detection ('ลำดับ')
+ * - Added 'relax_column_count: true' to fix empty pages 1-4
+ * - Improved CSV parsing robustness
+ * - Verified Graph HH:MM:SS formatting
  */
 
 const puppeteer = require('puppeteer');
@@ -152,13 +151,14 @@ function parseDayHourMinuteToSeconds(durationStr) {
 
 // --- Helper: Format Seconds to HH:MM:SS ---
 function formatSeconds(totalSeconds) {
+    if (isNaN(totalSeconds)) return "00:00:00";
     const h = Math.floor(totalSeconds / 3600);
     const m = Math.floor((totalSeconds % 3600) / 60);
     const s = Math.floor(totalSeconds % 60);
     return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 }
 
-// --- FUNCTION: Process CSV V3 ---
+// --- FUNCTION: Process CSV V3 (FIXED) ---
 function processCSV_V3(filePath, config) {
     try {
         if (!fs.existsSync(filePath)) {
@@ -167,9 +167,11 @@ function processCSV_V3(filePath, config) {
         }
 
         const fileContent = fs.readFileSync(filePath, 'utf8');
+        // FIX: Added relax_column_count to handle irregular footer rows
         const rows = parse(fileContent, {
             columns: false,
             skip_empty_lines: true,
+            relax_column_count: true, 
             bom: true
         });
 
@@ -263,7 +265,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation V3 (Revised V3)...');
+    console.log('🚀 Starting DTC Automation V3.1 (Fix)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -465,9 +467,9 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         const file5 = await waitForDownloadAndRename(downloadPath, 'Report5_ForbiddenParking.xls');
 
         // =================================================================
-        // STEP 7: Generate PDF Summary (REVISED V3)
+        // STEP 7: Generate PDF Summary (REVISED V3 FIXED)
         // =================================================================
-        console.log('📑 Step 7: Generating PDF Summary (Revised V3)...');
+        console.log('📑 Step 7: Generating PDF Summary (Revised V3.1)...');
 
         const FILES_CSV = {
             OVERSPEED: file1,
@@ -535,7 +537,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         ];
 
         // 4. Process Report 5: Prohibited
-        // Logic (Same as V2 but changing output): License=Col C(2), Station=Col E(4), Duration=Col J(9)
+        // Logic: License=Col C(2), Station=Col E(4), Duration=Col J(9)
         const rawForbidden = processCSV_V3(FILES_CSV.PROHIBITED, {
             colLicense: 2,
             colStation: 4,
@@ -816,7 +818,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                 from: `"DTC Reporter" <${EMAIL_USER}>`,
                 to: EMAIL_TO,
                 subject: `รายงานสรุปพฤติกรรมการขับขี่ (Fleet Safety Report) - ${today}`,
-                text: `เรียน ผู้เกี่ยวข้อง\n\nระบบส่งรายงานประจำวัน (06:00 - 18:00) ดังแนบ:\n1. ไฟล์ข้อมูลดิบ CSV (อยู่ใน Zip)\n2. ไฟล์ PDF สรุปภาพรวม (Revised V3)\n\nขอบคุณครับ\nDTC Automation Bot V3`,
+                text: `เรียน ผู้เกี่ยวข้อง\n\nระบบส่งรายงานประจำวัน (06:00 - 18:00) ดังแนบ:\n1. ไฟล์ข้อมูลดิบ CSV (อยู่ใน Zip)\n2. ไฟล์ PDF สรุปภาพรวม (Revised V3.1 Fixed)\n\nขอบคุณครับ\nDTC Automation Bot V3.1`,
                 attachments: attachments
             });
             console.log(`   ✅ Email Sent Successfully!`);
