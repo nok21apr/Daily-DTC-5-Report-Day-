@@ -487,50 +487,69 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         };
 
         // 1. Process Report 1: Over Speed
-        // (CSV Index: 0=No, 1=License, ..., Last=Duration)
-        const rawSpeed = processCSV(FILES_CSV.OVERSPEED, 5, { license: 1, duration: 10 }); 
+        // Criteria: License from Col B (index 1) with "-", Time from Col E (index 4)
+        // Skip 5 header lines
+        const rawSpeed = processCSV(FILES_CSV.OVERSPEED, 5, { license: 1, duration: 4 }); 
         const speedStats = {};
         rawSpeed.forEach(r => {
-            if (!speedStats[r.license]) speedStats[r.license] = { count: 0, time: 0, license: r.license };
-            speedStats[r.license].count++;
-            speedStats[r.license].time += parseDurationToSeconds(r.duration);
+            if (r.license && r.license.includes('-')) {
+                if (!speedStats[r.license]) speedStats[r.license] = { count: 0, time: 0, license: r.license };
+                speedStats[r.license].count++;
+                speedStats[r.license].time += parseDurationToSeconds(r.duration);
+            }
         });
-        const topSpeed = Object.values(speedStats).sort((a, b) => b.count - a.count).slice(0, 5);
+        // Sort by Total Time DESC
+        const topSpeed = Object.values(speedStats).sort((a, b) => b.time - a.time).slice(0, 10);
         const totalOverSpeed = rawSpeed.length;
 
         // 2. Process Report 2: Idling
+        // Criteria: License from Col B (index 1) with "-", Time from Col E (index 4)
+        // Skip 6 header lines
         const rawIdling = processCSV(FILES_CSV.IDLING, 6, { license: 1, duration: 4 });
         const idleStats = {};
         rawIdling.forEach(r => {
-            if (!idleStats[r.license]) idleStats[r.license] = { count: 0, time: 0, license: r.license };
-            idleStats[r.license].count++;
-            idleStats[r.license].time += parseDurationToSeconds(r.duration);
+            if (r.license && r.license.includes('-')) {
+                if (!idleStats[r.license]) idleStats[r.license] = { count: 0, time: 0, license: r.license };
+                idleStats[r.license].count++;
+                idleStats[r.license].time += parseDurationToSeconds(r.duration);
+            }
         });
-        const topIdle = Object.values(idleStats).sort((a, b) => b.time - a.time).slice(0, 5);
+        // Sort by Total Time DESC
+        const topIdle = Object.values(idleStats).sort((a, b) => b.time - a.time).slice(0, 10);
         const maxIdleCar = topIdle.length > 0 ? topIdle[0] : { time: 0, license: '-' };
 
         // 3. Process Report 3 & 4
-        const rawBrake = fs.existsSync(FILES_CSV.SUDDEN_BRAKE) ? processCSV(FILES_CSV.SUDDEN_BRAKE, 4, { license: 2, v_start: 4, v_end: 5 }) : [];
-        const rawStart = (FILES_CSV.HARSH_START && fs.existsSync(FILES_CSV.HARSH_START)) ? processCSV(FILES_CSV.HARSH_START, 4, { license: 2, v_start: 4, v_end: 5 }) : [];
+        // Criteria: License from Col B (index 1), Speed details
+        const rawBrake = fs.existsSync(FILES_CSV.SUDDEN_BRAKE) ? processCSV(FILES_CSV.SUDDEN_BRAKE, 4, { license: 1, v_start: 4, v_end: 5 }) : [];
+        const rawStart = (FILES_CSV.HARSH_START && fs.existsSync(FILES_CSV.HARSH_START)) ? processCSV(FILES_CSV.HARSH_START, 4, { license: 1, v_start: 4, v_end: 5 }) : [];
         
         const criticalEvents = [
             ...rawBrake.map(r => ({ ...r, type: 'Sudden Brake', level: 'High' })),
             ...rawStart.map(r => ({ ...r, type: 'Harsh Start', level: 'Medium' }))
-        ];
+        ].filter(r => r.license && r.license.includes('-'));
 
-        // 4. Process Report 5
-        const rawForbidden = processCSV(FILES_CSV.PROHIBITED, 5, { license: 1, station: 4, duration: 9 });
-        const forbiddenList = rawForbidden.map(r => ({
-            license: r.license,
-            station: r.station,
-            timeSec: parseDurationToSeconds(r.duration),
-            timeStr: r.duration
-        })).sort((a, b) => b.timeSec - a.timeSec).slice(0, 8);
+        // 4. Process Report 5: Prohibited
+        // Criteria: License from Col C (index 2), Station from Col E (index 4), Time from Col H (index 7)
+        // Skip 5 header lines (assuming based on snippet)
+        const rawForbidden = processCSV(FILES_CSV.PROHIBITED, 5, { license: 2, station: 4, duration: 7 });
+        const forbiddenList = rawForbidden
+            .filter(r => r.license && r.license.includes('-'))
+            .map(r => ({
+                license: r.license,
+                station: r.station,
+                timeSec: parseDurationToSeconds(r.duration),
+                timeStr: r.duration
+            }))
+            .sort((a, b) => b.timeSec - a.timeSec)
+            .slice(0, 10); // Top 10
         
+        // Chart Stats
         const forbiddenChartStats = {};
         rawForbidden.forEach(r => {
-            if(!forbiddenChartStats[r.license]) forbiddenChartStats[r.license] = 0;
-            forbiddenChartStats[r.license] += parseDurationToSeconds(r.duration);
+            if (r.license && r.license.includes('-')) {
+                if(!forbiddenChartStats[r.license]) forbiddenChartStats[r.license] = 0;
+                forbiddenChartStats[r.license] += parseDurationToSeconds(r.duration);
+            }
         });
         const topForbiddenChart = Object.entries(forbiddenChartStats)
             .map(([license, time]) => ({ license, time }))
@@ -620,13 +639,13 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             <div class="page">
             <div class="header-banner">1. การใช้ความเร็วเกินกำหนด (Over Speed Analysis)</div>
             <div class="content">
-                <h3>Top 5 Over Speed Frequency</h3>
+                <h3>Top 10 Over Speed by Duration</h3>
                 <div class="chart-container">
-                ${topSpeed.map(item => `
+                ${topSpeed.slice(0, 5).map(item => `
                     <div class="bar-row">
                     <div class="bar-label">${item.license}</div>
                     <div class="bar-track">
-                        <div class="bar-fill" style="width: ${(item.count / (topSpeed[0]?.count || 1)) * 100}%; background: #1E40AF;">${item.count}</div>
+                        <div class="bar-fill" style="width: ${(item.time / (topSpeed[0]?.time || 1)) * 100}%; background: #1E40AF;">${formatSeconds(item.time)}</div>
                     </div>
                     </div>
                 `).join('')}
@@ -654,13 +673,13 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             <div class="page">
             <div class="header-banner">2. การจอดไม่ดับเครื่อง (Idling Analysis)</div>
             <div class="content">
-                <h3>Top 5 Idling Duration (Minutes)</h3>
+                <h3>Top 10 Idling by Duration</h3>
                 <div class="chart-container">
-                ${topIdle.map(item => `
+                ${topIdle.slice(0, 5).map(item => `
                     <div class="bar-row">
                     <div class="bar-label">${item.license}</div>
                     <div class="bar-track">
-                        <div class="bar-fill" style="width: ${(item.time / (topIdle[0]?.time || 1)) * 100}%; background: #F59E0B;">${Math.round(item.time / 60)}m</div>
+                        <div class="bar-fill" style="width: ${(item.time / (topIdle[0]?.time || 1)) * 100}%; background: #F59E0B;">${formatSeconds(item.time)}</div>
                     </div>
                     </div>
                 `).join('')}
@@ -688,19 +707,40 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             <div class="page">
             <div class="header-banner">3. เหตุการณ์วิกฤต (Critical Safety Events)</div>
             <div class="content">
+                <h3 style="color: #DC2626;">3.1 Sudden Brake (เบรกกะทันหัน)</h3>
                 <table>
                 <thead>
-                    <tr><th>No.</th><th>ทะเบียนรถ</th><th>รายละเอียด</th><th>ประเภท</th></tr>
+                    <tr><th>No.</th><th>ทะเบียนรถ</th><th>รายละเอียด</th><th>ระดับความเสี่ยง</th></tr>
                 </thead>
                 <tbody>
-                    ${criticalEvents.map((item, idx) => `
+                    ${criticalEvents.filter(x => x.type === 'Sudden Brake').map((item, idx) => `
                     <tr>
                         <td>${idx + 1}</td>
                         <td>${item.license}</td>
                         <td>Speed: ${item.v_start} &#8594; ${item.v_end} km/h</td>
-                        <td class="risk-${item.level}">${item.type}</td>
+                        <td class="risk-${item.level}">${item.level}</td>
                     </tr>
                     `).join('')}
+                    ${criticalEvents.filter(x => x.type === 'Sudden Brake').length === 0 ? '<tr><td colspan="4" style="text-align:center">ไม่มีข้อมูล</td></tr>' : ''}
+                </tbody>
+                </table>
+
+                <br><br>
+                <h3 style="color: #F59E0B;">3.2 Harsh Start (ออกตัวกระชาก)</h3>
+                <table>
+                <thead>
+                    <tr><th>No.</th><th>ทะเบียนรถ</th><th>รายละเอียด</th><th>ระดับความเสี่ยง</th></tr>
+                </thead>
+                <tbody>
+                    ${criticalEvents.filter(x => x.type === 'Harsh Start').map((item, idx) => `
+                    <tr>
+                        <td>${idx + 1}</td>
+                        <td>${item.license}</td>
+                        <td>Speed: ${item.v_start} &#8594; ${item.v_end} km/h</td>
+                        <td class="risk-${item.level}">${item.level}</td>
+                    </tr>
+                    `).join('')}
+                    ${criticalEvents.filter(x => x.type === 'Harsh Start').length === 0 ? '<tr><td colspan="4" style="text-align:center">ไม่มีข้อมูล</td></tr>' : ''}
                 </tbody>
                 </table>
             </div>
@@ -716,7 +756,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                     <div class="bar-row">
                     <div class="bar-label">${item.license}</div>
                     <div class="bar-track">
-                        <div class="bar-fill" style="width: ${(item.time / (topForbiddenChart[0]?.time || 1)) * 100}%; background: #9333EA;">${Math.round(item.time / 60)}m</div>
+                        <div class="bar-fill" style="width: ${(item.time / (topForbiddenChart[0]?.time || 1)) * 100}%; background: #9333EA;">${formatSeconds(item.time)}</div>
                     </div>
                     </div>
                 `).join('')}
@@ -752,6 +792,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             printBackground: true
         });
         console.log(`   ✅ PDF Generated: ${pdfPath}`);
+
 
         // =================================================================
         // STEP 8: Zip & Email
