@@ -1,13 +1,10 @@
 /**
  * DTC Automation Script
- * Version: 3.3.0 (Fix Report 5 Time Calculation & Graph Accumulation)
+ * Version: 3.4.0 (Fix Missing Report 4 Data)
  * Last Updated: 31/01/2026
  * Changes:
- * - Added 'relax_column_count: true' to fix empty pages 1-4
- * - Improved CSV parsing robustness
- * - Report 5: Use Exit(Col G) - Enter(Col F) for duration
- * - Report 5: Graph uses accumulated time per license plate
- * - Improved Date Parser for mixed formats (DD/MM/YYYY & YYYY-MM-DD)
+ * - Fix 'file4' scope issue causing Harsh Start data to be missing in PDF
+ * - Retain all logic from v3.3.0 (Report 5 Calc, Graph, Relax Column)
  */
 
 const puppeteer = require('puppeteer');
@@ -172,7 +169,6 @@ function processCSV_V3(filePath, config) {
         }
 
         const fileContent = fs.readFileSync(filePath, 'utf8');
-        // FIX: Added relax_column_count to handle irregular footer rows
         const rows = parse(fileContent, {
             columns: false,
             skip_empty_lines: true,
@@ -207,7 +203,6 @@ function processCSV_V3(filePath, config) {
                 const item = { license };
 
                 // Calculate Time: (End - Start)
-                // Used for Report 1, 2, 5
                 if (config.useTimeCalc && config.colStart !== undefined && config.colEnd !== undefined) {
                     const t1 = parseDateTimeToSeconds(row[config.colStart]); 
                     const t2 = parseDateTimeToSeconds(row[config.colEnd]);   
@@ -216,7 +211,7 @@ function processCSV_V3(filePath, config) {
                 }
                 
                 // Other fields
-                if (config.colDate !== undefined) item.date = row[config.colDate]; // Col D for Rep 3/4
+                if (config.colDate !== undefined) item.date = row[config.colDate];
                 if (config.colStation !== undefined) item.station = row[config.colStation];
                 if (config.colSpeedStart !== undefined) item.v_start = row[config.colSpeedStart];
                 if (config.colSpeedEnd !== undefined) item.v_end = row[config.colSpeedEnd];
@@ -264,7 +259,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation V3.3 (Fix Report 5)...');
+    console.log('🚀 Starting DTC Automation V3.4 (Fix Report 4 Scope)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -387,6 +382,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
 
         // REPORT 4: Harsh Start
         console.log('📊 Processing Report 4: Harsh Start...');
+        let file4 = ''; // Fix Scope Issue: Declare variable outside try block
         try {
             await page.goto('https://gps.dtc.co.th/ultimate/Report/report_ha.php', { waitUntil: 'domcontentloaded' });
             await page.waitForSelector('#date9', { visible: true, timeout: 60000 });
@@ -424,7 +420,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                     if (excelBtn) excelBtn.click(); else throw new Error("Cannot find Export button for Report 4");
                 }
             });
-            const file4 = await waitForDownloadAndRename(downloadPath, 'Report4_HarshStart.xls');
+            file4 = await waitForDownloadAndRename(downloadPath, 'Report4_HarshStart.xls');
         } catch (error) {
             console.error('❌ Report 4 Failed:', error.message);
         }
@@ -466,15 +462,15 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         const file5 = await waitForDownloadAndRename(downloadPath, 'Report5_ForbiddenParking.xls');
 
         // =================================================================
-        // STEP 7: Generate PDF Summary (REVISED V3.3)
+        // STEP 7: Generate PDF Summary (REVISED V3.4)
         // =================================================================
-        console.log('📑 Step 7: Generating PDF Summary (Revised V3.3)...');
+        console.log('📑 Step 7: Generating PDF Summary (Revised V3.4)...');
 
         const FILES_CSV = {
             OVERSPEED: file1,
             IDLING: file2,
             SUDDEN_BRAKE: file3,
-            HARSH_START: typeof file4 !== 'undefined' ? file4 : '',
+            HARSH_START: file4 !== '' ? file4 : '', // Check outer variable
             PROHIBITED: file5
         };
 
@@ -821,7 +817,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                 from: `"DTC Reporter" <${EMAIL_USER}>`,
                 to: EMAIL_TO,
                 subject: `รายงานสรุปพฤติกรรมการขับขี่ (Fleet Safety Report) - ${today}`,
-                text: `เรียน ผู้เกี่ยวข้อง\n\nระบบส่งรายงานประจำวัน (06:00 - 18:00) ดังแนบ:\n1. ไฟล์ข้อมูลดิบ CSV (อยู่ใน Zip)\n2. ไฟล์ PDF สรุปภาพรวม (Revised V3.3 Fixed)\n\nขอบคุณครับ\nDTC Automation Bot V3.3`,
+                text: `เรียน ผู้เกี่ยวข้อง\n\nระบบส่งรายงานประจำวัน (06:00 - 18:00) ดังแนบ:\n1. ไฟล์ข้อมูลดิบ CSV (อยู่ใน Zip)\n2. ไฟล์ PDF สรุปภาพรวม (Revised V3.4 Fixed)\n\nขอบคุณครับ\nDTC Automation Bot V3.4`,
                 attachments: attachments
             });
             console.log(`   ✅ Email Sent Successfully!`);
