@@ -1,11 +1,13 @@
 /**
  * DTC Automation Script
- * Version: 3.1.0 (Fix Empty Pages & Graph)
+ * Version: 3.3.0 (Fix Report 5 Time Calculation & Graph Accumulation)
  * Last Updated: 31/01/2026
  * Changes:
  * - Added 'relax_column_count: true' to fix empty pages 1-4
  * - Improved CSV parsing robustness
- * - Verified Graph HH:MM:SS formatting
+ * - Report 5: Use Exit(Col G) - Enter(Col F) for duration
+ * - Report 5: Graph uses accumulated time per license plate
+ * - Improved Date Parser for mixed formats (DD/MM/YYYY & YYYY-MM-DD)
  */
 
 const puppeteer = require('puppeteer');
@@ -118,35 +120,38 @@ async function convertToCsv(sourcePath, destPath) {
     }
 }
 
-// --- Helper: Parse Thai Date (DD/MM/YYYY HH:mm:ss) ---
+// --- Helper: Parse Date (Supports DD/MM/YYYY and YYYY-MM-DD) ---
 function parseDateTimeToSeconds(dateStr) {
     if (!dateStr) return 0;
-    // Format: 31/01/2026 06:13:09
-    const parts = dateStr.split(/[ /:]/);
+    
+    // Split by space, slash, colon, or dash
+    const parts = dateStr.split(/[ /:-]/);
+    
+    // Must have at least Date parts (3) + Time parts (3) = 6
     if (parts.length < 6) return 0;
     
-    const date = new Date(
-        parseInt(parts[2]),       // Year
-        parseInt(parts[1]) - 1,   // Month (0-based)
-        parseInt(parts[0]),       // Day
-        parseInt(parts[3]),       // Hour
-        parseInt(parts[4]),       // Minute
-        parseInt(parts[5])        // Second
-    );
-    return date.getTime() / 1000;
-}
+    let day, month, year, hour, minute, second;
 
-// --- Helper: Parse Duration "Day:Hour:Minute" (From Report 5 Col J) ---
-function parseDayHourMinuteToSeconds(durationStr) {
-    if (!durationStr) return 0;
-    const parts = durationStr.split(':').map(Number);
-    if (parts.length === 3) {
-        const days = parts[0] || 0;
-        const hours = parts[1] || 0;
-        const mins = parts[2] || 0;
-        return (days * 86400) + (hours * 3600) + (mins * 60);
+    // Detect format based on first part length
+    // YYYY-MM-DD (Report 5)
+    if (parts[0].length === 4) {
+        year = parseInt(parts[0]);
+        month = parseInt(parts[1]) - 1; // JS Month is 0-11
+        day = parseInt(parts[2]);
+    } 
+    // DD/MM/YYYY (Reports 1-4)
+    else {
+        day = parseInt(parts[0]);
+        month = parseInt(parts[1]) - 1;
+        year = parseInt(parts[2]);
     }
-    return 0;
+    
+    hour = parseInt(parts[3]);
+    minute = parseInt(parts[4]);
+    second = parseInt(parts[5]);
+
+    const date = new Date(year, month, day, hour, minute, second);
+    return date.getTime() / 1000;
 }
 
 // --- Helper: Format Seconds to HH:MM:SS ---
@@ -202,20 +207,14 @@ function processCSV_V3(filePath, config) {
                 const item = { license };
 
                 // Calculate Time: (End - Start)
-                // Used for Report 1 & 2
+                // Used for Report 1, 2, 5
                 if (config.useTimeCalc && config.colStart !== undefined && config.colEnd !== undefined) {
-                    const t1 = parseDateTimeToSeconds(row[config.colStart]); // Col C
-                    const t2 = parseDateTimeToSeconds(row[config.colEnd]);   // Col D
+                    const t1 = parseDateTimeToSeconds(row[config.colStart]); 
+                    const t2 = parseDateTimeToSeconds(row[config.colEnd]);   
                     item.durationSec = (t2 > t1) ? (t2 - t1) : 0;
                     item.durationStr = formatSeconds(item.durationSec);
                 }
                 
-                // Specific for Report 5 (Duration from Raw String)
-                if (config.colDurationRaw !== undefined) {
-                    item.durationStrRaw = row[config.colDurationRaw]; // Col J
-                    item.durationSec = parseDayHourMinuteToSeconds(item.durationStrRaw);
-                }
-
                 // Other fields
                 if (config.colDate !== undefined) item.date = row[config.colDate]; // Col D for Rep 3/4
                 if (config.colStation !== undefined) item.station = row[config.colStation];
@@ -265,7 +264,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
     if (fs.existsSync(downloadPath)) fs.rmSync(downloadPath, { recursive: true, force: true });
     fs.mkdirSync(downloadPath);
 
-    console.log('🚀 Starting DTC Automation V3.1 (Fix)...');
+    console.log('🚀 Starting DTC Automation V3.3 (Fix Report 5)...');
     
     const browser = await puppeteer.launch({
         headless: true,
@@ -467,9 +466,9 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         const file5 = await waitForDownloadAndRename(downloadPath, 'Report5_ForbiddenParking.xls');
 
         // =================================================================
-        // STEP 7: Generate PDF Summary (REVISED V3 FIXED)
+        // STEP 7: Generate PDF Summary (REVISED V3.3)
         // =================================================================
-        console.log('📑 Step 7: Generating PDF Summary (Revised V3.1)...');
+        console.log('📑 Step 7: Generating PDF Summary (Revised V3.3)...');
 
         const FILES_CSV = {
             OVERSPEED: file1,
@@ -537,23 +536,27 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         ];
 
         // 4. Process Report 5: Prohibited
-        // Logic: License=Col C(2), Station=Col E(4), Duration=Col J(9)
+        // Logic: License=Col C(2), Station=Col E(4), Enter=Col F(5), Exit=Col G(6). 
+        // Use Calc: Exit - Enter (to get seconds precision)
         const rawForbidden = processCSV_V3(FILES_CSV.PROHIBITED, {
             colLicense: 2,
             colStation: 4,
-            colDurationRaw: 9 
+            colStart: 5,  // Enter Time
+            colEnd: 6,    // Exit Time
+            useTimeCalc: true
         });
 
         const forbiddenList = rawForbidden
             .sort((a, b) => b.durationSec - a.durationSec)
             .slice(0, 10);
         
-        // Chart Stats for Prohibited
+        // Chart Stats for Prohibited (Accumulated Time per License)
         const forbiddenChartStats = {};
         rawForbidden.forEach(r => {
             if(!forbiddenChartStats[r.license]) forbiddenChartStats[r.license] = 0;
             forbiddenChartStats[r.license] += r.durationSec;
         });
+        // Sort Top 5 by Accumulated Time
         const topForbiddenChart = Object.entries(forbiddenChartStats)
             .map(([license, time]) => ({ license, time }))
             .sort((a, b) => b.time - a.time).slice(0, 5);
@@ -767,7 +770,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                         <td>${idx + 1}</td>
                         <td>${item.license}</td>
                         <td>${item.station}</td>
-                        <td>${item.durationStrRaw || '-'}</td>
+                        <td>${item.durationStr}</td>
                     </tr>
                     `).join('')}
                 </tbody>
@@ -818,7 +821,7 @@ function zipFiles(sourceDir, outPath, filesToZip) {
                 from: `"DTC Reporter" <${EMAIL_USER}>`,
                 to: EMAIL_TO,
                 subject: `รายงานสรุปพฤติกรรมการขับขี่ (Fleet Safety Report) - ${today}`,
-                text: `เรียน ผู้เกี่ยวข้อง\n\nระบบส่งรายงานประจำวัน (06:00 - 18:00) ดังแนบ:\n1. ไฟล์ข้อมูลดิบ CSV (อยู่ใน Zip)\n2. ไฟล์ PDF สรุปภาพรวม (Revised V3.1 Fixed)\n\nขอบคุณครับ\nDTC Automation Bot V3.1`,
+                text: `เรียน ผู้เกี่ยวข้อง\n\nระบบส่งรายงานประจำวัน (06:00 - 18:00) ดังแนบ:\n1. ไฟล์ข้อมูลดิบ CSV (อยู่ใน Zip)\n2. ไฟล์ PDF สรุปภาพรวม (Revised V3.3 Fixed)\n\nขอบคุณครับ\nDTC Automation Bot V3.3`,
                 attachments: attachments
             });
             console.log(`   ✅ Email Sent Successfully!`);
