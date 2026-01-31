@@ -145,88 +145,88 @@ async function waitForTableData(page, minRows = 2, timeout = 300000) {
         console.warn('   ⚠️ Wait for table data timed out.');
     }
 }
+// ส่วนที่ 1: Helper Functions
+// ฟังก์ชันแปลงเวลาจาก format ภาษาไทย "0 ชม. 2 นาที 45 วินาที" เป็นวินาที
+function parseThaiDurationToSeconds(str) {
+    if (!str || typeof str !== 'string') return 0;
+    let seconds = 0;
+    const hourMatch = str.match(/(\d+)\s*ชม\./);
+    const minMatch = str.match(/(\d+)\s*นาที/);
+    const secMatch = str.match(/(\d+)\s*วินาที/);
 
-// --- HELPER: แปลงเวลาไทย/HH:MM:SS เป็นวินาที (Code ของคุณ) ---
-function parseDurationToSeconds(timeStr) {
-    if (!timeStr) return 0;
-    
-    // กรณี 1: "0 ชม. 1 นาที 31 วินาที"
-    const thaiMatch = timeStr.match(/(?:(\d+)\s*ชม\.)?\s*(?:(\d+)\s*นาที)?\s*(?:(\d+)\s*วินาที)?/);
-    if (thaiMatch && timeStr.includes('นาที')) {
-        const h = parseInt(thaiMatch[1] || 0);
-        const m = parseInt(thaiMatch[2] || 0);
-        const s = parseInt(thaiMatch[3] || 0);
-        return (h * 3600) + (m * 60) + s;
-    }
-
-    // กรณี 2: "00:11:19" (HH:MM:SS)
-    if (timeStr.includes(':')) {
-        const parts = timeStr.split(':').map(Number);
-        if (parts.length === 3) return (parts[0] * 3600) + (parts[1] * 60) + parts[2];
-        if (parts.length === 2) return (parts[0] * 60) + parts[1]; // MM:SS
-    }
-
-    return 0;
+    if (hourMatch) seconds += parseInt(hourMatch[1]) * 3600;
+    if (minMatch) seconds += parseInt(minMatch[1]) * 60;
+    if (secMatch) seconds += parseInt(secMatch[1]);
+    return seconds;
 }
 
-// --- HELPER: แปลงวินาทีกลับเป็น HH:MM:SS ---
-function formatSeconds(totalSeconds) {
+// ฟังก์ชันแปลงเวลาจาก format "HH:mm:ss" เป็นวินาที
+function parseColonDurationToSeconds(str) {
+    if (!str || typeof str !== 'string') return 0;
+    const parts = str.split(':').map(Number);
+    if (parts.length !== 3) return 0;
+    return (parts[0] * 3600) + (parts[1] * 60) + parts[2];
+}
+
+// ฟังก์ชันแปลงเวลา Forbidden Parking "วัน:ชั่วโมง:นาที" เป็นวินาที (เพื่อการจัดเรียง)
+function parseForbiddenDurationToSeconds(str) {
+    if (!str || typeof str !== 'string') return 0;
+    const parts = str.split(':').map(Number);
+    if (parts.length !== 3) return 0;
+    // วัน * 86400 + ชม * 3600 + นาที * 60
+    return (parts[0] * 86400) + (parts[1] * 3600) + (parts[2] * 60);
+}
+
+// ฟังก์ชันแปลงวินาที กลับเป็นข้อความสวยๆ
+function formatSecondsToText(totalSeconds) {
     const h = Math.floor(totalSeconds / 3600);
     const m = Math.floor((totalSeconds % 3600) / 60);
     const s = totalSeconds % 60;
-    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    
+    if (h > 0) return `${h} ชม. ${m} น.`;
+    if (m > 0) return `${m} น. ${s} วิ.`;
+    return `${s} วิ.`;
 }
 
-// --- FUNCTION: อ่านและประมวลผล CSV (Code ของคุณ) ---
-function processCSV(filePath, skipLines, colMap) {
-    try {
-        if (!fs.existsSync(filePath)) {
-            console.warn(`File not found: ${filePath}`);
-            return [];
+// ฟังก์ชันอ่าน CSV แบบข้ามบรรทัด Metadata โดยอัตโนมัติ (หาบรรทัดที่ขึ้นต้นด้วย "ลำดับ")
+function readCleanCSV(filePath) {
+    if (!fs.existsSync(filePath)) return [];
+    
+    const fileContent = fs.readFileSync(filePath, 'utf8');
+    const lines = fileContent.split('\n');
+    
+    // หาบรรทัดที่เป็น Header จริง (ต้องมีคำว่า "ลำดับ")
+    let headerIndex = -1;
+    for (let i = 0; i < Math.min(lines.length, 20); i++) {
+        if (lines[i].includes('ลำดับ') && lines[i].includes('ชื่อรถ')) {
+            headerIndex = i;
+            break;
         }
-        
-        const fileContent = fs.readFileSync(filePath, 'utf8');
-        // ข้ามบรรทัด Header ด้านบน
-        const lines = fileContent.split('\n').slice(skipLines).join('\n');
-        
-        const records = parse(lines, {
-            columns: false,
-            skip_empty_lines: true,
-            relax_column_count: true,
-            bom: true
-        });
+        // กรณี Forbidden Parking อาจใช้คำอื่น
+        if (lines[i].includes('ลำดับ') && lines[i].includes('ทะเบียนรถ')) {
+            headerIndex = i;
+            break;
+        }
+    }
 
-        return records.map(row => {
-            const data = {};
-            for (const [key, index] of Object.entries(colMap)) {
-                // index ที่ส่งมาเป็น 1-based (Excel Style) ต้องลบ 1
-                const idx = parseInt(index) - 1; 
-                data[key] = row[idx] ? row[idx].trim() : '';
-            }
-            return data;
-        }).filter(r => r.license); // กรองแถวว่างที่ไม่มีทะเบียนรถ
-    } catch (err) {
-        console.error(`Error reading ${filePath}:`, err.message);
+    if (headerIndex === -1) {
+        console.warn(`⚠️ Warning: Could not find valid header in ${path.basename(filePath)}`);
         return [];
     }
-}
 
-function getTodayFormatted() {
-    const date = new Date();
-    const options = { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Asia/Bangkok' };
-    return new Intl.DateTimeFormat('en-CA', options).format(date);
-}
-
-function zipFiles(sourceDir, outPath, filesToZip) {
-    return new Promise((resolve, reject) => {
-        const output = fs.createWriteStream(outPath);
-        const archive = archiver('zip', { zlib: { level: 9 } });
-        output.on('close', () => resolve(outPath));
-        archive.on('error', (err) => reject(err));
-        archive.pipe(output);
-        filesToZip.forEach(file => archive.file(path.join(sourceDir, file), { name: file }));
-        archive.finalize();
-    });
+    // ตัดส่วนหัวทิ้ง เอาตั้งแต่ Header จริงลงมา
+    const cleanCSVContent = lines.slice(headerIndex).join('\n');
+    
+    try {
+        return parse(cleanCSVContent, {
+            columns: true,
+            skip_empty_lines: true,
+            relax_quotes: true
+        });
+    } catch (e) {
+        console.error(`❌ Error parsing CSV ${path.basename(filePath)}:`, e.message);
+        return [];
+    }
 }
 
 // --- Main Script ---
@@ -476,322 +476,261 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         // =================================================================
         // STEP 7: Generate PDF Summary (UPDATED WITH YOUR LOGIC)
         // =================================================================
-        console.log('📑 Step 7: Generating PDF Summary...');
+        console.log('7. Processing Data & Generating PDF Report...');
 
-        const FILES_CSV = {
-            OVERSPEED: file1,
-            IDLING: file2,
-            SUDDEN_BRAKE: file3,
-            HARSH_START: typeof file4 !== 'undefined' ? file4 : '',
-            PROHIBITED: file5
-        };
+// --- 7.1 อ่านและเตรียมข้อมูล ---
+// ใช้ชื่อไฟล์ตามที่คุณกำหนดใน Step ก่อนหน้า
+const rawOverSpeed = readCleanCSV(path.join(downloadPath, 'Converted_Report1_OverSpeed.csv'));
+const rawIdling = readCleanCSV(path.join(downloadPath, 'Converted_Report2_Idling.csv'));
+const rawSudden = readCleanCSV(path.join(downloadPath, 'Converted_Report3_SuddenBrake.csv'));
+const rawHarsh = readCleanCSV(path.join(downloadPath, 'Converted_Report4_HarshStart.csv'));
+const rawForbidden = readCleanCSV(path.join(downloadPath, 'Converted_Report5_ForbiddenParking.csv'));
 
-        // 1. Process Report 1: Over Speed
-        // Criteria: License from Col B (index 1) with "-", Time from Col E (index 4)
-        // Skip 5 header lines
-        const rawSpeed = processCSV(FILES_CSV.OVERSPEED, 5, { license: 1, duration: 4 }); 
-        const speedStats = {};
-        rawSpeed.forEach(r => {
-            if (r.license && r.license.includes('-')) {
-                if (!speedStats[r.license]) speedStats[r.license] = { count: 0, time: 0, license: r.license };
-                speedStats[r.license].count++;
-                speedStats[r.license].time += parseDurationToSeconds(r.duration);
-            }
-        });
-        // Sort by Total Time DESC
-        const topSpeed = Object.values(speedStats).sort((a, b) => b.time - a.time).slice(0, 10);
-        const totalOverSpeed = rawSpeed.length;
+// --- 7.2 ประมวลผลข้อมูล (Logic ใหม่) ---
 
-        // 2. Process Report 2: Idling
-        // Criteria: License from Col B (index 1) with "-", Time from Col E (index 4)
-        // Skip 6 header lines
-        const rawIdling = processCSV(FILES_CSV.IDLING, 6, { license: 1, duration: 4 });
-        const idleStats = {};
-        rawIdling.forEach(r => {
-            if (r.license && r.license.includes('-')) {
-                if (!idleStats[r.license]) idleStats[r.license] = { count: 0, time: 0, license: r.license };
-                idleStats[r.license].count++;
-                idleStats[r.license].time += parseDurationToSeconds(r.duration);
-            }
-        });
-        // Sort by Total Time DESC
-        const topIdle = Object.values(idleStats).sort((a, b) => b.time - a.time).slice(0, 10);
-        const maxIdleCar = topIdle.length > 0 ? topIdle[0] : { time: 0, license: '-' };
+// A. Over Speed Analysis (รวมเวลาตามทะเบียนรถ)
+const overSpeedMap = new Map();
+rawOverSpeed.forEach(row => {
+    // กรองบรรทัดสรุป "รวม" ทิ้ง
+    if (!row['ชื่อรถ'] || row['ชื่อรถ'].trim() === 'รวม' || !row['ลำดับ']) return;
+    
+    const carId = row['ชื่อรถ'] || row['ทะเบียนรถ'];
+    // Parse เวลาแบบภาษาไทย "0 ชม. 2 นาที 45 วินาที"
+    const duration = parseThaiDurationToSeconds(row['รวมเวลา']);
+    
+    if (!overSpeedMap.has(carId)) {
+        overSpeedMap.set(carId, { count: 0, duration: 0 });
+    }
+    const data = overSpeedMap.get(carId);
+    data.count += 1;
+    data.duration += duration;
+});
+// แปลง Map เป็น Array และ Sort ตามเวลามากไปน้อย
+const topOverSpeed = Array.from(overSpeedMap.entries())
+    .map(([car, data]) => ({ car, ...data }))
+    .sort((a, b) => b.duration - a.duration)
+    .slice(0, 10); // Top 10
 
-        // 3. Process Report 3 & 4
-        // Criteria: License from Col B (index 1), Speed details
-        const rawBrake = fs.existsSync(FILES_CSV.SUDDEN_BRAKE) ? processCSV(FILES_CSV.SUDDEN_BRAKE, 4, { license: 1, v_start: 4, v_end: 5 }) : [];
-        const rawStart = (FILES_CSV.HARSH_START && fs.existsSync(FILES_CSV.HARSH_START)) ? processCSV(FILES_CSV.HARSH_START, 4, { license: 1, v_start: 4, v_end: 5 }) : [];
-        
-        const criticalEvents = [
-            ...rawBrake.map(r => ({ ...r, type: 'Sudden Brake', level: 'High' })),
-            ...rawStart.map(r => ({ ...r, type: 'Harsh Start', level: 'Medium' }))
-        ].filter(r => r.license && r.license.includes('-'));
 
-        // 4. Process Report 5: Prohibited
-        // Criteria: License from Col C (index 2), Station from Col E (index 4), Time from Col H (index 7)
-        // Skip 5 header lines (assuming based on snippet)
-        const rawForbidden = processCSV(FILES_CSV.PROHIBITED, 5, { license: 2, station: 4, duration: 7 });
-        const forbiddenList = rawForbidden
-            .filter(r => r.license && r.license.includes('-'))
-            .map(r => ({
-                license: r.license,
-                station: r.station,
-                timeSec: parseDurationToSeconds(r.duration),
-                timeStr: r.duration
-            }))
-            .sort((a, b) => b.timeSec - a.timeSec)
-            .slice(0, 10); // Top 10
-        
-        // Chart Stats
-        const forbiddenChartStats = {};
-        rawForbidden.forEach(r => {
-            if (r.license && r.license.includes('-')) {
-                if(!forbiddenChartStats[r.license]) forbiddenChartStats[r.license] = 0;
-                forbiddenChartStats[r.license] += parseDurationToSeconds(r.duration);
-            }
-        });
-        const topForbiddenChart = Object.entries(forbiddenChartStats)
-            .map(([license, time]) => ({ license, time }))
-            .sort((a, b) => b.time - a.time).slice(0, 5);
+// B. Idling Analysis (รวมเวลาตามทะเบียนรถ)
+const idlingMap = new Map();
+rawIdling.forEach(row => {
+    if (!row['ชื่อรถ'] || row['ชื่อรถ'].trim() === 'รวม' || !row['ลำดับ']) return;
+    
+    const carId = row['ชื่อรถ'];
+    // Parse เวลาแบบ "HH:mm:ss"
+    const duration = parseColonDurationToSeconds(row['รวมเวลา']);
+    
+    if (!idlingMap.has(carId)) {
+        idlingMap.set(carId, { count: 0, duration: 0 });
+    }
+    const data = idlingMap.get(carId);
+    data.count += 1;
+    data.duration += duration;
+});
+const topIdling = Array.from(idlingMap.entries())
+    .map(([car, data]) => ({ car, ...data }))
+    .sort((a, b) => b.duration - a.duration)
+    .slice(0, 10);
 
-        // --- HTML GENERATION ---
-        const today = new Date().toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric' });
-        
-        const html = `
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@300;400;600;700&display=swap" rel="stylesheet">
-            <style>
-            @page { size: A4; margin: 0; }
-            body { font-family: 'Noto Sans Thai', sans-serif; margin: 0; padding: 0; background: #fff; color: #333; }
-            .page { width: 210mm; height: 296mm; position: relative; page-break-after: always; overflow: hidden; }
-            .content { padding: 40px; }
-            
-            .header-banner { background: #1E40AF; color: white; padding: 15px 40px; font-size: 24px; font-weight: bold; margin-bottom: 30px; }
-            h1 { font-size: 32px; color: #1E40AF; margin-bottom: 10px; }
-            
-            .grid-2x2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 50px; }
-            .card { background: #F8FAFC; border-radius: 12px; padding: 30px; text-align: center; border: 1px solid #E2E8F0; }
-            .card-title { font-size: 18px; font-weight: bold; margin-bottom: 10px; }
-            .card-value { font-size: 48px; font-weight: bold; margin: 10px 0; }
-            .card-sub { font-size: 14px; color: #64748B; }
-            
-            .c-blue { color: #1E40AF; }
-            .c-orange { color: #F59E0B; }
-            .c-red { color: #DC2626; }
-            .c-purple { color: #9333EA; }
-            
-            .chart-container { margin: 40px 0; }
-            .bar-row { display: flex; align-items: center; margin-bottom: 15px; }
-            .bar-label { width: 180px; text-align: right; padding-right: 15px; font-weight: 600; font-size: 14px; }
-            .bar-track { flex-grow: 1; background: #F1F5F9; height: 30px; border-radius: 4px; overflow: hidden; }
-            .bar-fill { height: 100%; display: flex; align-items: center; justify-content: flex-end; padding-right: 10px; color: white; font-size: 12px; font-weight: bold; }
-            
-            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-            th { background: #1E40AF; color: white; padding: 12px; text-align: left; }
-            td { padding: 10px; border-bottom: 1px solid #E2E8F0; }
-            tr:nth-child(even) { background: #F8FAFC; }
-            .risk-High { color: #DC2626; font-weight: bold; }
-            .risk-Medium { color: #F59E0B; font-weight: bold; }
-            </style>
-        </head>
-        <body>
 
-            <!-- Page 1: Executive Summary -->
-            <div class="page">
-            <div style="text-align: center; padding-top: 60px;">
-                <h1 style="font-size: 48px;">รายงานสรุปพฤติกรรมการขับขี่</h1>
-                <div style="font-size: 24px; color: #64748B;">Fleet Safety & Telematics Analysis Report</div>
-                <div style="margin-top: 20px; font-size: 18px;">ประจำวันที่: ${today}</div>
-            </div>
+// C. Forbidden Parking Analysis
+const forbiddenMap = new Map();
+rawForbidden.forEach(row => {
+    if (!row['ทะเบียนรถ'] || row['ทะเบียนรถ'].trim() === 'รวม' || !row['ลำดับ']) return;
 
-            <div class="content">
-                <div class="header-banner" style="margin-top: 40px; text-align: center;">บทสรุปผู้บริหาร (Executive Summary)</div>
-                
-                <div class="grid-2x2">
-                <div class="card">
-                    <div class="card-title c-blue">Over Speed (ครั้ง)</div>
-                    <div class="card-value c-blue">${totalOverSpeed}</div>
-                    <div class="card-sub">เหตุการณ์ทั้งหมด</div>
-                </div>
-                <div class="card">
-                    <div class="card-title c-orange">Max Idling (สูงสุด)</div>
-                    <div class="card-value c-orange">${Math.round(maxIdleCar.time / 60)}m</div>
-                    <div class="card-sub">${maxIdleCar.license}</div>
-                </div>
-                <div class="card">
-                    <div class="card-title c-red">Critical Events</div>
-                    <div class="card-value c-red">${criticalEvents.length}</div>
-                    <div class="card-sub">เบรก/ออกตัว กระชาก</div>
-                </div>
-                <div class="card">
-                    <div class="card-title c-purple">พื้นที่ห้ามจอด</div>
-                    <div class="card-value c-purple">${rawForbidden.length}</div>
-                    <div class="card-sub">จำนวนครั้งทั้งหมด</div>
-                </div>
-                </div>
-            </div>
-            </div>
+    const carId = row['ทะเบียนรถ'];
+    const location = row['ชื่อสถานี'] || '-';
+    // Parse เวลาแบบ "dd:HH:mm" (วัน:ชั่วโมง:นาที)
+    const rawTime = row['รวมเวลาในสถานี(วัน:ชั่วโมง:นาที)'];
+    const duration = parseForbiddenDurationToSeconds(rawTime);
 
-            <!-- Page 2: Over Speed -->
-            <div class="page">
-            <div class="header-banner">1. การใช้ความเร็วเกินกำหนด (Over Speed Analysis)</div>
-            <div class="content">
-                <h3>Top 10 Over Speed by Duration</h3>
-                <div class="chart-container">
-                ${topSpeed.slice(0, 5).map(item => `
-                    <div class="bar-row">
-                    <div class="bar-label">${item.license}</div>
-                    <div class="bar-track">
-                        <div class="bar-fill" style="width: ${(item.time / (topSpeed[0]?.time || 1)) * 100}%; background: #1E40AF;">${formatSeconds(item.time)}</div>
-                    </div>
-                    </div>
-                `).join('')}
-                </div>
+    if (!forbiddenMap.has(carId)) {
+        forbiddenMap.set(carId, { count: 0, duration: 0, location: location });
+    }
+    const data = forbiddenMap.get(carId);
+    data.count += 1;
+    data.duration += duration;
+});
+const topForbidden = Array.from(forbiddenMap.entries())
+    .map(([car, data]) => ({ car, ...data }))
+    .sort((a, b) => b.duration - a.duration)
+    .slice(0, 10);
 
-                <table>
-                <thead>
-                    <tr><th>No.</th><th>ทะเบียนรถ</th><th>จำนวนครั้ง</th><th>รวมเวลา</th></tr>
-                </thead>
-                <tbody>
-                    ${topSpeed.map((item, idx) => `
-                    <tr>
-                        <td>${idx + 1}</td>
-                        <td>${item.license}</td>
-                        <td>${item.count}</td>
-                        <td>${formatSeconds(item.time)}</td>
-                    </tr>
-                    `).join('')}
-                </tbody>
-                </table>
-            </div>
-            </div>
 
-            <!-- Page 3: Idling -->
-            <div class="page">
-            <div class="header-banner">2. การจอดไม่ดับเครื่อง (Idling Analysis)</div>
-            <div class="content">
-                <h3>Top 10 Idling by Duration</h3>
-                <div class="chart-container">
-                ${topIdle.slice(0, 5).map(item => `
-                    <div class="bar-row">
-                    <div class="bar-label">${item.license}</div>
-                    <div class="bar-track">
-                        <div class="bar-fill" style="width: ${(item.time / (topIdle[0]?.time || 1)) * 100}%; background: #F59E0B;">${formatSeconds(item.time)}</div>
-                    </div>
-                    </div>
-                `).join('')}
-                </div>
+// D. Critical Events (นับจำนวนเฉยๆ สำหรับรายการแสดงผล)
+// กรองแถวว่างและแถวสรุปออก
+const listSudden = rawSudden.filter(row => row['ลำดับ'] && row['ทะเบียนรถ'] && row['ทะเบียนรถ'] !== 'รวม');
+const listHarsh = rawHarsh.filter(row => row['ลำดับ'] && row['ทะเบียนรถ'] && row['ทะเบียนรถ'] !== 'รวม');
 
-                <table>
-                <thead>
-                    <tr><th>No.</th><th>ทะเบียนรถ</th><th>จำนวนครั้ง</th><th>รวมเวลา</th></tr>
-                </thead>
-                <tbody>
-                    ${topIdle.map((item, idx) => `
-                    <tr>
-                        <td>${idx + 1}</td>
-                        <td>${item.license}</td>
-                        <td>${item.count}</td>
-                        <td>${formatSeconds(item.time)}</td>
-                    </tr>
-                    `).join('')}
-                </tbody>
-                </table>
-            </div>
-            </div>
+// E. Summary Stats
+const totalOverSpeedEvents = rawOverSpeed.filter(r => r['ลำดับ']).length;
+const totalIdlingEvents = rawIdling.filter(r => r['ลำดับ']).length;
+const totalForbiddenEvents = rawForbidden.filter(r => r['ลำดับ']).length;
+const totalCriticalEvents = listSudden.length + listHarsh.length;
 
-            <!-- Page 4: Critical Events -->
-            <div class="page">
-            <div class="header-banner">3. เหตุการณ์วิกฤต (Critical Safety Events)</div>
-            <div class="content">
-                <h3 style="color: #DC2626;">3.1 Sudden Brake (เบรกกะทันหัน)</h3>
-                <table>
-                <thead>
-                    <tr><th>No.</th><th>ทะเบียนรถ</th><th>รายละเอียด</th><th>ระดับความเสี่ยง</th></tr>
-                </thead>
-                <tbody>
-                    ${criticalEvents.filter(x => x.type === 'Sudden Brake').map((item, idx) => `
-                    <tr>
-                        <td>${idx + 1}</td>
-                        <td>${item.license}</td>
-                        <td>Speed: ${item.v_start} &#8594; ${item.v_end} km/h</td>
-                        <td class="risk-${item.level}">${item.level}</td>
-                    </tr>
-                    `).join('')}
-                    ${criticalEvents.filter(x => x.type === 'Sudden Brake').length === 0 ? '<tr><td colspan="4" style="text-align:center">ไม่มีข้อมูล</td></tr>' : ''}
-                </tbody>
-                </table>
+// --- 7.3 สร้าง HTML Content ---
+const htmlContent = `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: 'Sarabun', sans-serif; padding: 20px; color: #333; }
+        h1, h2 { color: #004085; border-bottom: 2px solid #004085; padding-bottom: 5px; }
+        h3 { color: #555; margin-top: 20px; }
+        .summary-box { display: flex; justify-content: space-between; margin-bottom: 30px; }
+        .card { background: #f8f9fa; padding: 15px; border-radius: 8px; width: 22%; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .card h4 { margin: 0; color: #666; font-size: 14px; }
+        .card .val { font-size: 24px; font-weight: bold; color: #0056b3; margin-top: 5px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 12px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #004085; color: white; text-align: center; }
+        td { text-align: center; }
+        .text-left { text-align: left; }
+        .warning { color: #d9534f; font-weight: bold; }
+        .page-break { page-break-before: always; }
+    </style>
+</head>
+<body>
 
-                <br><br>
-                <h3 style="color: #F59E0B;">3.2 Harsh Start (ออกตัวกระชาก)</h3>
-                <table>
-                <thead>
-                    <tr><th>No.</th><th>ทะเบียนรถ</th><th>รายละเอียด</th><th>ระดับความเสี่ยง</th></tr>
-                </thead>
-                <tbody>
-                    ${criticalEvents.filter(x => x.type === 'Harsh Start').map((item, idx) => `
-                    <tr>
-                        <td>${idx + 1}</td>
-                        <td>${item.license}</td>
-                        <td>Speed: ${item.v_start} &#8594; ${item.v_end} km/h</td>
-                        <td class="risk-${item.level}">${item.level}</td>
-                    </tr>
-                    `).join('')}
-                    ${criticalEvents.filter(x => x.type === 'Harsh Start').length === 0 ? '<tr><td colspan="4" style="text-align:center">ไม่มีข้อมูล</td></tr>' : ''}
-                </tbody>
-                </table>
-            </div>
-            </div>
+    <div style="text-align: center; margin-bottom: 30px;">
+        <h1>รายงานสรุปพฤติกรรมการขับขี่ (Fleet Safety Report)</h1>
+        <p>ประจำวันที่: ${today}</p>
+    </div>
 
-            <!-- Page 5: Prohibited Parking -->
-            <div class="page">
-            <div class="header-banner">4. รายงานพื้นที่ห้ามจอด (Prohibited Parking Area Report)</div>
-            <div class="content">
-                <h3>Top 5 Prohibited Area Duration</h3>
-                <div class="chart-container">
-                ${topForbiddenChart.map(item => `
-                    <div class="bar-row">
-                    <div class="bar-label">${item.license}</div>
-                    <div class="bar-track">
-                        <div class="bar-fill" style="width: ${(item.time / (topForbiddenChart[0]?.time || 1)) * 100}%; background: #9333EA;">${formatSeconds(item.time)}</div>
-                    </div>
-                    </div>
-                `).join('')}
-                </div>
+    <!-- Executive Summary -->
+    <h2>บทสรุปผู้บริหาร (Executive Summary)</h2>
+    <div class="summary-box">
+        <div class="card">
+            <h4>Over Speed (ครั้ง)</h4>
+            <div class="val">${totalOverSpeedEvents}</div>
+        </div>
+        <div class="card">
+            <h4>Idling (ครั้ง)</h4>
+            <div class="val">${totalIdlingEvents}</div>
+        </div>
+        <div class="card">
+            <h4>Critical Events</h4>
+            <div class="val">${totalCriticalEvents}</div>
+            <small>(เบรก/ออกตัว กระชาก)</small>
+        </div>
+        <div class="card">
+            <h4>พื้นที่ห้ามจอด (ครั้ง)</h4>
+            <div class="val">${totalForbiddenEvents}</div>
+        </div>
+    </div>
 
-                <table>
-                <thead>
-                    <tr><th>No.</th><th>ทะเบียนรถ</th><th>ชื่อสถานี</th><th>รวมเวลา</th></tr>
-                </thead>
-                <tbody>
-                    ${forbiddenList.map((item, idx) => `
-                    <tr>
-                        <td>${idx + 1}</td>
-                        <td>${item.license}</td>
-                        <td>${item.station}</td>
-                        <td>${item.timeStr}</td>
-                    </tr>
-                    `).join('')}
-                </tbody>
-                </table>
-            </div>
-            </div>
+    <!-- 1. Over Speed -->
+    <h3>1. การใช้ความเร็วเกินกำหนด (Top 10 Over Speed by Duration)</h3>
+    <table>
+        <tr>
+            <th style="width: 10%">No.</th>
+            <th style="width: 50%">ทะเบียนรถ/ชื่อรถ</th>
+            <th style="width: 20%">จำนวนครั้ง</th>
+            <th style="width: 20%">รวมเวลา</th>
+        </tr>
+        ${topOverSpeed.length > 0 ? topOverSpeed.map((item, index) => `
+        <tr>
+            <td>${index + 1}</td>
+            <td class="text-left">${item.car}</td>
+            <td>${item.count}</td>
+            <td class="warning">${formatSecondsToText(item.duration)}</td>
+        </tr>`).join('') : '<tr><td colspan="4">ไม่มีข้อมูลความเร็วเกินกำหนด</td></tr>'}
+    </table>
 
-        </body>
-        </html>
-        `;
+    <!-- 2. Idling -->
+    <h3>2. การจอดไม่ดับเครื่อง (Top 10 Idling by Duration)</h3>
+    <table>
+        <tr>
+            <th style="width: 10%">No.</th>
+            <th style="width: 50%">ทะเบียนรถ/ชื่อรถ</th>
+            <th style="width: 20%">จำนวนครั้ง</th>
+            <th style="width: 20%">รวมเวลา</th>
+        </tr>
+        ${topIdling.length > 0 ? topIdling.map((item, index) => `
+        <tr>
+            <td>${index + 1}</td>
+            <td class="text-left">${item.car}</td>
+            <td>${item.count}</td>
+            <td class="warning">${formatSecondsToText(item.duration)}</td>
+        </tr>`).join('') : '<tr><td colspan="4">ไม่มีข้อมูลจอดไม่ดับเครื่อง</td></tr>'}
+    </table>
 
-        await page.setContent(html, { waitUntil: 'networkidle0' });
-        const pdfPath = path.join(downloadPath, 'Fleet_Safety_Analysis_Report.pdf');
-        await page.pdf({
-            path: pdfPath,
-            format: 'A4',
-            printBackground: true
-        });
-        console.log(`   ✅ PDF Generated: ${pdfPath}`);
+    <div class="page-break"></div>
+
+    <!-- 3. Critical Events -->
+    <h2>3. เหตุการณ์วิกฤต (Critical Safety Events)</h2>
+    
+    <h3>3.1 Sudden Brake (เบรกกะทันหัน)</h3>
+    <table>
+        <tr>
+            <th style="width: 10%">No.</th>
+            <th style="width: 30%">ทะเบียนรถ</th>
+            <th style="width: 20%">เวลาที่เกิดเหตุ</th>
+            <th style="width: 40%">สถานที่ (ตำบล/อำเภอ)</th>
+        </tr>
+        ${listSudden.length > 0 ? listSudden.map((row, index) => `
+        <tr>
+            <td>${index + 1}</td>
+            <td class="text-left">${row['ชื่อรถ'] || row['ทะเบียนรถ']}</td>
+            <td>${row['วันที่บันทึก'] ? row['วันที่บันทึก'].split(' ')[1] : '-'}</td>
+            <td class="text-left">${row['ตำบล'] || '-'} ${row['อำเภอ'] || '-'}</td>
+        </tr>`).join('') : '<tr><td colspan="4">ไม่มีข้อมูลเบรกกะทันหัน</td></tr>'}
+    </table>
+
+    <h3>3.2 Harsh Start (ออกตัวกระชาก)</h3>
+    <table>
+        <tr>
+            <th style="width: 10%">No.</th>
+            <th style="width: 30%">ทะเบียนรถ</th>
+            <th style="width: 20%">เวลาที่เกิดเหตุ</th>
+            <th style="width: 40%">สถานที่ (ตำบล/อำเภอ)</th>
+        </tr>
+        ${listHarsh.length > 0 ? listHarsh.map((row, index) => `
+        <tr>
+            <td>${index + 1}</td>
+            <td class="text-left">${row['ชื่อรถ'] || row['ทะเบียนรถ']}</td>
+            <td>${row['วันที่บันทึก'] ? row['วันที่บันทึก'].split(' ')[1] : '-'}</td>
+            <td class="text-left">${row['ตำบล'] || '-'} ${row['อำเภอ'] || '-'}</td>
+        </tr>`).join('') : '<tr><td colspan="4">ไม่มีข้อมูลออกตัวกระชาก</td></tr>'}
+    </table>
+
+    <!-- 4. Forbidden Parking -->
+    <h3>4. รายงานพื้นที่ห้ามจอด (Prohibited Parking Area Report)</h3>
+    <table>
+        <tr>
+            <th style="width: 10%">No.</th>
+            <th style="width: 30%">ทะเบียนรถ</th>
+            <th style="width: 30%">สถานีห้ามจอด</th>
+            <th style="width: 15%">จำนวนครั้ง</th>
+            <th style="width: 15%">รวมเวลา</th>
+        </tr>
+        ${topForbidden.length > 0 ? topForbidden.map((item, index) => `
+        <tr>
+            <td>${index + 1}</td>
+            <td class="text-left">${item.car}</td>
+            <td class="text-left">${item.location}</td>
+            <td>${item.count}</td>
+            <td class="warning">${formatSecondsToText(item.duration)}</td>
+        </tr>`).join('') : '<tr><td colspan="5">ไม่มีข้อมูลจอดในพื้นที่ห้ามจอด</td></tr>'}
+    </table>
+
+</body>
+</html>
+`;
+
+// --- 7.4 Generate PDF ---
+const pdfPath = path.join(downloadPath, 'Fleet_Safety_Analysis_Report.pdf');
+await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
+await page.pdf({
+    path: pdfPath,
+    format: 'A4',
+    printBackground: true,
+    margin: { top: '20px', bottom: '20px', left: '20px', right: '20px' }
+});
+
+console.log(`   ✅ PDF Report Generated: ${pdfPath}`);
 
 
         // =================================================================
