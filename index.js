@@ -352,8 +352,8 @@ function zipFiles(sourceDir, outPath, filesToZip) {
         }, startDateTime, endDateTime);
         
         await page.click('td:nth-of-type(6) > span');
-        console.log('   ⏳ Waiting 3 mins (Strict)...');
-        await new Promise(r => setTimeout(r, 180000));
+        console.log('   ⏳ Waiting 4 mins (Strict)...');
+        await new Promise(r => setTimeout(r, 240000));
         await page.evaluate(() => document.getElementById('btnexport').click());
         const file2 = await waitForDownloadAndRename(downloadPath, 'Report2_Idling.xls');
 
