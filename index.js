@@ -408,8 +408,8 @@ function zipFiles(sourceDir, outPath, filesToZip) {
             await page.evaluate(() => {
                 if (typeof sertch_data === 'function') { sertch_data(); } else { document.querySelector('td:nth-of-type(6) > span').click(); }
             });
-            console.log('   ⏳ Waiting 3 mins (Strict)...');
-            await new Promise(r => setTimeout(r, 180000));
+            console.log('   ⏳ Waiting 4 mins (Strict)...');
+            await new Promise(r => setTimeout(r, 240000));
             await page.evaluate(() => {
                 const xpathResult = document.evaluate('//*[@id="table"]/div[1]/button[3]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
                 const btn = xpathResult.singleNodeValue;
